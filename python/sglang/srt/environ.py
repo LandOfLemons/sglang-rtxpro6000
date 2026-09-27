@@ -345,6 +345,8 @@ class Envs:
     SGLANG_LOG_SCHEDULER_STATUS_TARGET = EnvStr("")
     SGLANG_LOG_SCHEDULER_STATUS_INTERVAL = EnvFloat(60.0)
     SGLANG_ENABLE_RANK_CONSENSUS_CHECKER = EnvBool(False)
+    # Stall-only QSA chunk-prefill phase and CUDA-event diagnostics.
+    SGLANG_QSA_STALL_DIAGNOSTICS = EnvBool(False)
 
     # ===================================================================
     # IPC, broadcasters, and ports

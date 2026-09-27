@@ -16,6 +16,7 @@ import msgspec
 import torch
 import torch.nn.functional as F
 
+from sglang.srt.environ import envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.qsa.config import (
     QSA_VARIANT_COMPRESSED,
@@ -41,6 +42,7 @@ from sglang.srt.layers.attention.qsa.sparse_attn import (
     sparse_gqa_fwd_interface_triton,
     sparse_gqa_fwd_interface_triton_ck,
 )
+from sglang.srt.layers.attention.qsa.stall_diagnostics import QSAStallDiagnostics
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 
 logger = logging.getLogger(__name__)
@@ -263,6 +265,11 @@ class QwenSparseAttnBackend(AttentionBackend):
         self._trtllm_workspace = None
         self._graph_extend_lens = None
         self._graph_extend_lens_pin = None
+        self.qsa_stall_diagnostics = (
+            QSAStallDiagnostics() if envs.SGLANG_QSA_STALL_DIAGNOSTICS.get() else None
+        )
+        if self.qsa_stall_diagnostics is not None:
+            logger.info("QSA stall diagnostics enabled (30s stall threshold)")
 
     @staticmethod
     def _is_speculative_paged_mode(forward_mode) -> bool:
@@ -1620,10 +1627,17 @@ class QwenSparseAttnBackend(AttentionBackend):
         # The validated chunk-prefill kernel consumes tightly packed full-context
         # K/V. Current-chunk K/V has already been committed to the cache above.
         pool = self.token_to_kv_pool
+        diagnostics = getattr(self, "qsa_stall_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.mark_before_kv_getters(layer.layer_id, pool)
         k_buffer = pool.get_key_buffer(layer.layer_id)
         v_buffer = pool.get_value_buffer(layer.layer_id)
+        if diagnostics is not None:
+            diagnostics.set_phase(layer.layer_id, "before_req_indices_to_list")
         req_to_token = self.req_to_token_pool.req_to_token
         req_indices = forward_batch.req_pool_indices.tolist()
+        if diagnostics is not None:
+            diagnostics.set_phase(layer.layer_id, "after_req_indices_to_list")
         # Join the gather INDICES, not the gathered K/V.  An index row is 8 B
         # per token; a K (or V) row is tp_kv_head_num * head_dim bytes.  Gathering
         # per request and then torch.cat-ing the results materialised a SECOND
@@ -1643,6 +1657,8 @@ class QwenSparseAttnBackend(AttentionBackend):
             sequence_lens, dtype=torch.int32, device=q.device
         )
         cu_seqlens_k = F.pad(sequence_lens_tensor.cumsum(0), (1, 0)).contiguous()
+        if diagnostics is not None:
+            diagnostics.set_phase(layer.layer_id, "before_sparse_attention")
         output = sparse_gqa_fwd_interface_triton_ck(
             q.contiguous(),
             k_buffer.index_select(0, gather_index),
@@ -1653,6 +1669,8 @@ class QwenSparseAttnBackend(AttentionBackend):
             sequence_lens_tensor,
             layer.scaling,
         )
+        if diagnostics is not None:
+            diagnostics.set_phase(layer.layer_id, "sparse_attention_enqueued")
         return self._pad_extend_output(output, num_output_rows)
 
     @staticmethod

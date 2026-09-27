@@ -1653,12 +1653,21 @@ class Qwen4ExpAttentionDecoderLayer(
         indexer_metadata = get_qsa_indexer_metadata(
             backend, self.layer_id, forward_batch
         )
+        diagnostics = getattr(sparse_backend, "qsa_stall_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.set_phase(self.layer_id, "before_indexer")
+        tracked = diagnostics is not None and diagnostics.is_tracking(self.layer_id)
+        if tracked:
+            diagnostics.mark_stage(self.layer_id, "before_indexer")
         topk_indices = self.indexer(
             hidden_states,
             positions,
             forward_batch,
             indexer_metadata,
+            **({"stall_diagnostics": diagnostics} if tracked else {}),
         )
+        if diagnostics is not None:
+            diagnostics.mark_indexer_enqueued(self.layer_id)
         should_capture = getattr(
             sparse_backend, "should_capture_mtp_sparse_indices", None
         )
@@ -1669,6 +1678,32 @@ class Qwen4ExpAttentionDecoderLayer(
         return topk_indices
 
     def self_attention(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+    ) -> torch.Tensor:
+        if self.is_qsa:
+            from sglang.srt.layers.attention.qsa.glue import (
+                resolve_qsa_sparse_backend,
+            )
+
+            sparse_backend = resolve_qsa_sparse_backend(get_attn_backend())
+            diagnostics = getattr(sparse_backend, "qsa_stall_diagnostics", None)
+            if diagnostics is not None:
+                with diagnostics.track(
+                    layer_id=self.layer_id,
+                    hidden_states=hidden_states,
+                    forward_batch=forward_batch,
+                ) as tracked:
+                    if tracked:
+                        diagnostics.mark_stage(self.layer_id, "layer_entry")
+                    return self._self_attention_impl(
+                        positions, hidden_states, forward_batch
+                    )
+        return self._self_attention_impl(positions, hidden_states, forward_batch)
+
+    def _self_attention_impl(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
