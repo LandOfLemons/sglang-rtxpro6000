@@ -19,11 +19,17 @@ any TP2 ``_0_2``/``_1_2`` -- silent aliasing inside one root requires
 bypassing both guards, which is why they fail closed rather than purge.
 """
 
+import contextlib
+import errno
 import importlib.util
+import io
 import json
+import os
 import subprocess
 import tempfile
+import types
 from pathlib import Path
+from unittest import mock
 
 from sglang.srt.mem_cache.hicache_storage import HiCacheStorageConfig
 from sglang.srt.mem_cache.storage.nixl.namespace_layout import (
@@ -285,3 +291,68 @@ class NamespaceTpTest(CustomTestCase):
         # other half of the no-alias story.
         config = _config(2, tp_rank=1)
         self.assertFalse(config.is_mla_model)  # non-MLA path uses rank suffixes
+
+
+class TestFreshNamespaceFullFilesystem(CustomTestCase):
+    """derive_namespace creates the root before SGLang starts: a full or
+    inode-exhausted filesystem must be explained before the first mkdir."""
+
+    IDENTITY = {"schema": MODULE.SCHEMA, "fields": {}, "models": {}, "runtime": {}}
+
+    @staticmethod
+    def _vfs(blocks, avail_blocks, files=1000, favail=1000, frsize=4096):
+        return types.SimpleNamespace(
+            f_bsize=frsize,
+            f_frsize=frsize,
+            f_blocks=blocks,
+            f_bfree=avail_blocks,
+            f_bavail=avail_blocks,
+            f_files=files,
+            f_ffree=favail,
+            f_favail=favail,
+        )
+
+    def test_missing_root_on_full_filesystem_warns_before_create(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "fresh_namespace"
+            probed: list[str] = []
+
+            def fake_statvfs(target):
+                probed.append(target)
+                return self._vfs(1000, 0)
+
+            stderr = io.StringIO()
+            with mock.patch.object(os, "statvfs", side_effect=fake_statvfs), contextlib.redirect_stderr(stderr):
+                MODULE.ensure_manifest(root, self.IDENTITY, "0" * 64)
+            self.assertEqual(probed, [td], "nearest existing parent is probed")
+            self.assertIn(str(root), stderr.getvalue())
+            self.assertIn("is full", stderr.getvalue())
+            self.assertIn("old cache namespaces known to be unused", stderr.getvalue())
+            self.assertTrue(root.is_dir(), "warning is additive; creation proceeds")
+
+    def test_adequate_space_stays_quiet(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "fresh_namespace"
+            stderr = io.StringIO()
+            with mock.patch.object(os, "statvfs", return_value=self._vfs(1000, 500)), contextlib.redirect_stderr(stderr):
+                MODULE.ensure_manifest(root, self.IDENTITY, "0" * 64)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertTrue((root / MODULE.MANIFEST_NAME).is_file())
+
+    def test_probe_failure_never_blocks_creation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "fresh_namespace"
+            with mock.patch.object(os, "statvfs", side_effect=OSError("nope")):
+                MODULE.ensure_manifest(root, self.IDENTITY, "0" * 64)
+            self.assertTrue((root / MODULE.MANIFEST_NAME).is_file())
+
+    def test_warning_prevents_silent_enospc_on_mkdir(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "fresh_namespace"
+            stderr = io.StringIO()
+            with mock.patch.object(os, "statvfs", return_value=self._vfs(1000, 0)), mock.patch.object(
+                Path, "mkdir", side_effect=OSError(errno.ENOSPC, "No space left on device")
+            ), contextlib.redirect_stderr(stderr), self.assertRaises(OSError) as raised:
+                MODULE.ensure_manifest(root, self.IDENTITY, "0" * 64)
+            self.assertEqual(raised.exception.errno, errno.ENOSPC)
+            self.assertIn("is full", stderr.getvalue(), "warned before the failure")
