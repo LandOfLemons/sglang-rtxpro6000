@@ -1,5 +1,6 @@
 """Unit tests for host-pool allocation and free-list bookkeeping."""
 
+import os
 import threading
 import unittest
 import unittest.mock
@@ -20,6 +21,111 @@ from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
 register_cpu_ci(est_time=2, suite="base-a-test-cpu")
+
+
+class TestTorchPinnedHostAllocator(CustomTestCase):
+    """WSL2 opt-in torch-pinned host allocation; native defaults preserved."""
+
+    def _alloc(self, env_value, allocator, register_calls, pinned_calls):
+        """Run alloc_with_host_register with the torch.empty boundary mocked.
+
+        Keeps the test CPU-only: no real cudaHostAlloc/pinning, no GPU.
+        """
+        from sglang.srt.mem_cache.pool_host import common
+
+        def fake_empty(dims, dtype=None, device=None, pin_memory=False):
+            pinned_calls.append(
+                {
+                    "dims": dims,
+                    "dtype": dtype,
+                    "device": device,
+                    "pin_memory": pin_memory,
+                }
+            )
+            return torch.zeros(dims, dtype=dtype)
+
+        with unittest.mock.patch.dict(
+            os.environ, {"SGLANG_HICACHE_TORCH_PINNED_ALLOC": env_value}
+        ), unittest.mock.patch.object(
+            common, "_cuda_host_register", lambda buf: register_calls.append(buf)
+        ), unittest.mock.patch.object(
+            common.torch, "empty", side_effect=fake_empty
+        ):
+            return common.alloc_with_host_register(
+                (4,), torch.float16, "cpu", True, allocator
+            )
+
+    def test_gate_off_uses_allocator_and_host_register(self):
+        calls = []
+        allocated = torch.zeros(4, dtype=torch.float16)
+
+        class _Allocator:
+            def allocate(self, dims, dtype, device):
+                calls.append((dims, dtype, device))
+                return allocated
+
+        registered = []
+        pinned_calls = []
+        buf = self._alloc("0", _Allocator(), registered, pinned_calls)
+        self.assertEqual(calls, [((4,), torch.float16, "cpu")])
+        self.assertIs(buf, allocated)
+        # pin_memory=True must have gone through cudaHostRegister.
+        self.assertEqual(registered, [allocated])
+        self.assertEqual(pinned_calls, [])  # torch.empty never consulted
+
+    def test_gate_on_uses_torch_pinned_and_skips_host_register(self):
+        from sglang.srt.mem_cache.pool_host import common
+
+        registered = []
+        pinned_calls = []
+        buf = self._alloc("1", common.HostTensorAllocator(), registered, pinned_calls)
+        self.assertEqual(
+            pinned_calls,
+            [
+                {
+                    "dims": (4,),
+                    "dtype": torch.float16,
+                    "device": "cpu",
+                    "pin_memory": True,
+                }
+            ],
+        )
+        self.assertEqual(registered, [])
+        self.assertEqual(buf.shape, (4,))
+        self.assertEqual(buf.dtype, torch.float16)
+        self.assertEqual(buf.device.type, "cpu")
+
+    def test_gate_on_replaces_only_the_default_allocator(self):
+        """shm/mooncake-style backing must error, not lose its storage contract."""
+        from sglang.srt.mem_cache.pool_host import common
+
+        registered = []
+        pinned_calls = []
+        with self.assertRaises(RuntimeError) as ctx:
+            self._alloc("1", common.ShmHostTensorAllocator(), registered, pinned_calls)
+        msg = str(ctx.exception)
+        self.assertIn("SGLANG_HICACHE_TORCH_PINNED_ALLOC", msg)
+        self.assertIn("ShmHostTensorAllocator", msg)
+        self.assertEqual(registered, [])
+        self.assertEqual(pinned_calls, [])  # no silent torch replacement
+
+    def test_destroy_skips_unregister_only_when_gated_on(self):
+        class _Pool:
+            def __init__(self):
+                self.pin_memory = True
+                self.kv_buffer = torch.zeros(4)
+                self._destroyed = False
+
+        for env_value, expect_calls in (("0", 1), ("1", 0)):
+            with unittest.mock.patch.dict(
+                os.environ, {"SGLANG_HICACHE_TORCH_PINNED_ALLOC": env_value}
+            ), unittest.mock.patch.object(base, "_is_cuda", True), unittest.mock.patch.object(
+                base, "_cuda_host_unregister"
+            ) as unregister:
+                pool = _Pool()
+                base.HostKVCache.destroy(pool)
+            self.assertEqual(unregister.call_count, expect_calls, env_value)
+            self.assertIsNone(pool.kv_buffer)
 
 
 class TestHostKVCache(CustomTestCase):

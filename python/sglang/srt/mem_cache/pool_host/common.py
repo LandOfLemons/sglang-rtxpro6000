@@ -144,6 +144,19 @@ def _cuda_host_unregister(buffer: torch.Tensor) -> None:
         )
 
 
+def use_torch_pinned_host_allocator() -> bool:
+    """Opt-in torch cudaHostAlloc-backed host pools (WSL2 alias workaround).
+
+    WSL2 gives cudaHostRegister'd mmap memory a CUDA device alias distinct
+    from Tensor.data_ptr(), which HiCache kernels consume directly.
+    cudaHostAlloc'd memory is device-visible at its own UVA pointer. Native
+    Linux keeps the default host-register path unless the env is set.
+    """
+    from sglang.srt.environ import envs
+
+    return envs.SGLANG_HICACHE_TORCH_PINNED_ALLOC.get()
+
+
 def alloc_with_host_register(
     dims: tuple,
     dtype: torch.dtype,
@@ -155,6 +168,20 @@ def alloc_with_host_register(
     Allocate tensor and register host memory with cudaHostRegister.
     CudaHostRegister only applies when pin_memory=True.
     """
+    if use_torch_pinned_host_allocator():
+        # WSL2 escape hatch: only the plain mmap-backed default allocator is
+        # replaceable by torch's pinned-memory pool (no cudaHostRegister, no
+        # host unregister). Subclass allocators carry ownership/storage
+        # contracts a torch buffer cannot honour (shm memfd fds exposed via
+        # HostKVCache.fd, mooncake/mori remote registration); replacing them
+        # silently would discard that contract, so refuse instead.
+        if type(allocator) is not HostTensorAllocator:
+            raise RuntimeError(
+                "SGLANG_HICACHE_TORCH_PINNED_ALLOC cannot replace "
+                f"{type(allocator).__name__}; torch pinned host allocation is "
+                "only supported for the default mmap host allocator."
+            )
+        return torch.empty(dims, dtype=dtype, device=device, pin_memory=pin_memory)
     buffer = allocator.allocate(dims, dtype=dtype, device=device)
     if pin_memory:
         _cuda_host_register(buffer)

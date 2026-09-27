@@ -712,6 +712,11 @@ class Envs:
     SGLANG_ENABLE_HICACHE_BUFFER_ANCHOR_LOCK = EnvBool(False)
     SGLANG_HICACHE_BUFFER_ANCHOR_LOCK_CAP = EnvFloat(0.5)
     SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR = EnvStr(None)
+    # Opt-in (WSL2): allocate HiCache host pool buffers via torch's
+    # cudaHostAlloc-backed pinned memory instead of cudaHostRegister'd mmap,
+    # whose CUDA device alias differs from Tensor.data_ptr() under WSL2.
+    # Unset/0 preserves the native-Linux host-register allocator defaults.
+    SGLANG_HICACHE_TORCH_PINNED_ALLOC = EnvBool(False)
     # Enable O_DIRECT when opening NIXL POSIX backend files (bypasses OS page cache).
     # Disable with SGLANG_HICACHE_NIXL_USE_DIRECT_IO=0 or via the
     # "use_direct_io": false key in --hicache-storage-backend-extra-config.

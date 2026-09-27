@@ -6,6 +6,50 @@
 
 namespace sglang {
 
+// WSL2 gives cudaHostRegister'd host memory a CUDA device alias that differs
+// from Tensor.data_ptr(); native Linux UVA returns the same address. Resolve
+// the device-visible alias before handing a host buffer to the kernel.
+// On resolution failure, only a pointer the driver *positively* reports as
+// unregistered host memory may fall back to the host address; a registered
+// buffer whose alias failed, and a pointer whose state the driver cannot
+// report at all, must fail loud instead of letting the kernel dereference an
+// address it cannot access.
+inline void* pinned_host_device_ptr(void* host_ptr) {
+  if (host_ptr == nullptr) return nullptr;
+  void* device_ptr = nullptr;
+#ifndef USE_ROCM
+  if (cudaHostGetDevicePointer(&device_ptr, host_ptr, 0) == cudaSuccess) {
+    return device_ptr != nullptr ? device_ptr : host_ptr;
+  }
+  cudaPointerAttributes attrs{};
+  const cudaError_t attr_err = cudaPointerGetAttributes(&attrs, host_ptr);
+  host::RuntimeCheck(
+      attr_err == cudaSuccess,
+      "transfer_mamba: host pointer state unreadable (cudaPointerGetAttributes "
+      "failed) and no device alias resolved; refusing the host-pointer fallback");
+  host::RuntimeCheck(
+      attrs.type != cudaMemoryTypeHost,
+      "transfer_mamba: alias resolution failed for a registered host buffer; "
+      "refusing to pass the raw host pointer to the device");
+  return host_ptr;  // driver-reported unregistered host memory
+#else
+  if (hipHostGetDevicePointer(&device_ptr, host_ptr, 0) == hipSuccess) {
+    return device_ptr != nullptr ? device_ptr : host_ptr;
+  }
+  hipPointerAttribute_t attrs{};
+  const hipError_t attr_err = hipPointerGetAttributes(&attrs, host_ptr);
+  host::RuntimeCheck(
+      attr_err == hipSuccess,
+      "transfer_mamba: host pointer state unreadable (hipPointerGetAttributes "
+      "failed) and no device alias resolved; refusing the host-pointer fallback");
+  host::RuntimeCheck(
+      attrs.type != hipMemoryTypeHost,
+      "transfer_mamba: alias resolution failed for a registered host buffer; "
+      "refusing to pass the raw host pointer to the device");
+  return host_ptr;  // driver-reported unregistered host memory
+#endif
+}
+
 constexpr int kBlockSize = 1024;
 constexpr int kBlockQuotaBackup = 2;
 constexpr int kBlockQuotaLoad = 2;
@@ -115,7 +159,7 @@ struct TransferMambaKernel {
     dim3 grid(grid_x);
 
     const auto params = MambaTransferParams{
-        .src_base = static_cast<const char*>(src.data_ptr()),
+        .src_base = static_cast<const char*>(pinned_host_device_ptr(src.data_ptr())),
         .dst_base = static_cast<char*>(dst.data_ptr()),
         .layer_ptrs = nullptr,
         .src_indices = static_cast<const int64_t*>(src_indices.data_ptr()),
@@ -169,7 +213,7 @@ struct TransferMambaKernel {
 
     const auto params = MambaTransferParams{
         .src_base = nullptr,
-        .dst_base = static_cast<char*>(dst.data_ptr()),
+        .dst_base = static_cast<char*>(pinned_host_device_ptr(dst.data_ptr())),
         .layer_ptrs = static_cast<const uintptr_t*>(src_ptrs.data_ptr()),
         .src_indices = static_cast<const int64_t*>(src_indices.data_ptr()),
         .dst_indices = static_cast<const int64_t*>(dst_indices.data_ptr()),
