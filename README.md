@@ -67,8 +67,10 @@ build is needed.
 ## Model profiles and launch recipes
 
 The two profiles below are equally supported with **524,288-token context,
-HiCache and NIXL** on one RTX PRO 6000. [RESULTS.md](RESULTS.md) identifies the
-exact checkpoints used for each benchmark campaign.
+HiCache and NIXL** on one RTX PRO 6000.
+
+I personally run Flash-Next at **C=6 (six concurrent requests)**, with
+**524,288-token context** and an observed token pool of **1,039,040 tokens**.
 
 | Profile | Precision | Speculative decoding | Reference models | Run |
 |---|---|---|---|---|
@@ -137,88 +139,64 @@ Either option can be used on its own. Both are off by default; the linked
 guides explain how to enable them and what was tested. For request capacity
 and media preprocessing, see the [launch options](RUN.md).
 
-### Flash-Next v2.5.0 online-FP8 performance at a glance
+<a id="performance-and-qualification"></a>
+<a id="performance-and-testing"></a>
 
-**Beyond our machine:** [Community results](COMMUNITY-RESULTS.md) collects
-reports from independent users, including more than a week of Max-Q agentic use:
-**4.8 billion prompt tokens with a reported 96% prefix-cache hit rate**, plus
-**55 million generated tokens**. It also covers both-model benchmarks and TP2.
-Special thanks to [u/StockSpecialist1707](COMMUNITY-RESULTS.md#stockspecialist1707--single-gpu-capacity-and-online-fp8)
-for independently stress-testing v2.5 with a **1.11M-token KV pool** and sharing
-the workload results and limits, not just a successful boot.
+## Performance
 
-Measured September 11, 2026, on one RTX PRO 6000, TP1, with FR-Spec,
-524,288-token context, 824,384 KV tokens, RAM-backed PLE and HiCache/NIXL
-retained. Online FP8 was compared with a fresh immediately preceding option-off
-reference using the same serving shape and RadixArk ModelOpt NVFP4 checkpoint.
-The v2.5.0 arm also includes startup-only grammar warmup and loader-lifetime
-maintenance. Online FP8 changes precision; the table compares the complete
-source states.
+Here are the latest published benchmarks for each model on one RTX PRO 6000.
+Both use 524,288-token context with HiCache and NIXL enabled.
 
-| Single-request workload | Option off | Online FP8 | Observed change |
+<a id="flash-next-v250-online-fp8-performance-at-a-glance"></a>
+
+### Qwen3.8 Flash-Next NVFP4 with online FP8
+
+Measured September 11, 2026, on v2.5.0 with FR-Spec, RAM-backed PLE and an
+824,384-token KV pool, using the RadixArk ModelOpt NVFP4 checkpoint.
+
+| Single-request workload | Online FP8 off | Online FP8 on | Improvement |
 |---|---:|---:|---:|
 | Short, 1,024 output tokens | 161.47 tok/s | **207.12 tok/s** | **+28.3%** |
 | 128K context, 1,024 output tokens | 154.70 tok/s | **195.63 tok/s** | **+26.5%** |
 | 490K context, 1,024 output tokens | 149.14 tok/s | **172.64 tok/s** | **+15.8%** |
 
-Rates are client-observed post-first-token decode. The short values are
-three-run medians; 128K and 490K are single observations. Cold TTFT did not
-improve in the long samples. Online FP8 also left 7.52 GiB available after
-graph capture versus 3.66 GiB in the earlier matching boot—about 3.86 GiB more.
-The precision changes are explained in
-[FP8.md](FP8.md); detailed timings are in
-[RESULTS.md](RESULTS.md#pennyroyal-v250--optional-online-fp8).
+These are decode rates after the first token. The short result is a three-run
+median; the long-context rows are single runs. Online FP8 also freed about
+**3.86 GiB** after graph capture. See [online FP8 setup](FP8.md) to enable it.
 
-The RadixArk checkpoint was used for the full performance and quality campaign,
-including a focused **64/64 exact** opaque-record recall request. See
-[FP8.md](FP8.md#qualified-scope) for the tests and model requirements.
+<a id="27b-fp8--dflash2-performance-at-a-glance"></a>
 
-## Retained v2.4.0 Flash-Next prefill measurements
+### Qwen3.8-27B FP8 with DFlash2
 
-Measured September 9, 2026, with **v2.4.0 and FR-Spec on one RTX PRO 6000, TP1**,
-keeping 524,288-token context, 824,384 KV tokens, and HiCache/NIXL enabled.
-The table records that configuration and date; speeds vary with workload and
-system state.
+Measured September 10, 2026, on v2.4.1 with 1,118,784-token target and draft
+KV pools, using the OrcaRouter FP8 checkpoint linked above.
 
-| Workload | Speed | Timing / result |
+| Workload | Speed | Result |
 |---|---:|---|
-| 64K cold prefill — 63,864 input tokens | **14,842 tok/s** | Server prefill rate; 5.242 s to first token; exact READY |
-| 490K cold prefill — 489,879 input tokens | **8,773 tok/s** | Server prefill rate; 60.613 s to first token; all three needles found |
-| Single-request decode — 1,024 output tokens | **181.72 tok/s** | Median of three runs; excludes time to first token |
-| Four simultaneous requests — 1,024 output tokens each | **446.49 tok/s aggregate** | Median of three runs; includes time to first token and the slowest response |
+| 64K cold prefill — 63,888 input tokens | **6,570 tok/s** | 10.468 s to first token; exact READY |
+| 490K cold prefill — 489,903 input tokens | **1,646 tok/s** | 302.320 s to first token; all three needles found |
+| Single-request decode — 1,024 output tokens | **108.31 tok/s** | After the first token |
+| Four simultaneous requests — 1,024 output tokens each | **374.98 tok/s aggregate** | Combined throughput, including time to first token |
 
-Prefill rates divide input tokens by the server's initial-prefill time; client
-time to first token includes other request processing. The 4–10% gain compares
-that same server timing window before and after v2.4.0. Older tables use TTFT.
-Each cold-prefill row is one observation, and warm-prefill speed was not
-measured separately. Decode varies with workload and acceptance. The
-four-request figure is aggregate throughput across the group.
-See [RESULTS.md](RESULTS.md#pennyroyal-v240--prefill-and-maintenance) for the
-comparison; earlier v2.3 measurements remain there as dated history.
+Prefill uses the server's initial-prefill time. Decode results are three-run
+medians; the four-request rate measures the whole group through its last response.
 
-**In real agentic use:** a session on September 6 sustained
-**155 tok/s** across nine responses of at least 1,024 output tokens, with
-roughly **203K–280K input context**. Those responses generated 22,535 tokens;
-the rate excludes prefill, time between requests, and short replies.
-[Session details and method](RESULTS.md#flash-next-agentic-session--september-6-2026).
+<a id="retained-v240-flash-next-prefill-measurements"></a>
+<a id="qwen38-27b-fp8dflash2--august-24-2026-campaign"></a>
+<a id="27b-real-agentic-context-behavior"></a>
+<a id="earlier-releases"></a>
+<a id="v23--faster-flash-next-decoding-with-fr-spec"></a>
+<a id="previous-v212--maintenance-release"></a>
 
-## 27B FP8 / DFlash2 performance at a glance
+**[Benchmark history and detailed results](RESULTS.md)** includes earlier
+releases, prefill comparisons, real agentic workloads, and cache-restoration
+results for both models.
 
-Measured September 10, 2026, during **v2.4.1 qualification on one RTX PRO 6000,
-TP1**, keeping 524,288-token context, 1,118,784-token target and draft KV pools,
-and HiCache/NIXL enabled. Speeds describe that workload and system state.
+<a id="independent-tp2-fp8-validation"></a>
 
-| Workload | Speed | Timing / result |
-|---|---:|---|
-| 64K cold prefill — 63,888 input tokens | **6,570 tok/s** | Server prefill rate; 10.468 s to first token; exact READY |
-| 490K cold prefill — 489,903 input tokens | **1,646 tok/s** | Server prefill rate; 302.320 s to first token; all three needles found |
-| Single-request decode — 1,024 output tokens | **108.31 tok/s** | Median of three runs; excludes time to first token |
-| Four simultaneous requests — 1,024 output tokens each | **374.98 tok/s aggregate** | Median of three runs; includes time to first token and the slowest response |
-
-Prefill uses the server's initial-prefill time, with one cold observation at
-each length. Decode values are three-run medians. This campaign measured the
-v2.4.1 configuration without an earlier-release comparison.
-[Results and timing details](RESULTS.md#qwen38-27bdflash2-september-10-qualification).
+**[Community results](COMMUNITY-RESULTS.md)** covers other users' setups,
+including Max-Q and two-GPU runs. Thanks to u/StockSpecialist1707 for the
+1.11M-token KV-pool testing and H3PO for the TP2 results.
 
 ## Broader model support without HiCache/NIXL
 
@@ -244,15 +222,6 @@ Flash-Next support was built at model release and tested on this machine across
 524K context, multimodal input, reasoning, tools, agentic workloads, CUDA-graph
 recovery, and persistent prefix restoration. Hardware- and model-specific
 paths are documented in [BACKENDS.md](BACKENDS.md).
-
-<a id="v23--faster-flash-next-decoding-with-fr-spec"></a>
-<a id="previous-v212--maintenance-release"></a>
-
-## Earlier releases
-
-The [release history](CHANGES.md) covers earlier maintenance and feature work.
-The [v2.3 FR-Spec comparison](RESULTS.md#pennyroyal-v23--flash-next-fr-spec)
-preserves its original baselines, measurements, and qualification results.
 
 ## Validation suite
 
@@ -292,14 +261,6 @@ A short note distinguishing the Pennyroyal source or technique from your own
 changes helps readers reproduce the lineage, understand what you improved, and
 find both projects.
 
-## Published identity
-
-The current release is **[Pennyroyal v2.5.3](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.3)**,
-tag `pennyroyal-v2.5.3`. The default branch is `pennyroyal-main-sm120-final`.
-[PROVENANCE.md](PROVENANCE.md) records source and checkpoint identities;
-[BUILD.md](BUILD.md#qualified-environment) lists the tested dependencies.
-The former `jpezzulli/qwen38-dflash2-pro6000` URL redirects here.
-
 <a id="qualified-configuration-matrix"></a>
 <a id="resolved-backends-qwen38-27bdflash2"></a>
 <a id="resolved-backends-qwen38-flash-next"></a>
@@ -316,56 +277,6 @@ The former `jpezzulli/qwen38-dflash2-pro6000` URL redirects here.
 - [GPU allocation and persistence](MEMORY-AND-PERSISTENCE.md): RecoverSSM,
   automatic KV sizing, host state, and NIXL representation namespaces.
 
-<a id="performance-and-qualification"></a>
-
-## Performance and testing
-
-The [v2.5.0 table above](#flash-next-v250-online-fp8-performance-at-a-glance)
-shows the online-FP8 C1 observations; the
-[retained v2.4.0 table](#retained-v240-flash-next-prefill-measurements) preserves
-the earlier prefill measurements. The
-[earlier Flash-Next campaign](RESULTS.md#earlier-flash-next-campaign),
-including its source, clock settings, and quality results, remains in
-RESULTS.md. The 27B and third-party sections below use different models,
-hardware, and methods.
-
-### Independent TP=2 FP8 validation
-
-H3PO independently validated this runtime on a dual-GPU TP=2/EP=2 FP8
-deployment with native MTP after removing the optional overlap-plan-stream
-setting. The results, test data and configuration are in
-[RESULTS.md](RESULTS.md#independent-tp2-fp8-validation).
-See [Community results](COMMUNITY-RESULTS.md#h3po--two-gpu-flash-next) for
-H3PO's NVFP4 follow-up and reports from other operators.
-
-### Qwen3.8-27B FP8/DFlash2 — August 24, 2026 campaign
-
-Measured for the `qwen38-dflash2-pro6000-20260824` release on one RTX PRO
-6000 at TP1. These results remain associated with that dated release.
-
-| Test | Result |
-|---|---:|
-| 64K prefill | 6,163.07 tok/s |
-| 489,921-token prefill | 1,618.31 tok/s; 3/3 exact needles |
-| 1x 1,024-token decode | 108.75 tok/s after first token |
-| 4x 1,024-token decode | 390.23 tok/s aggregate |
-| Reasoning, xhigh / medium | 98.26 / 95.807 |
-| Medium tool suite | 30/30 tool selections and arguments; 29/30 reviewed response discipline |
-
-The August 26 confirmation of the 24-slot/five-state configuration retained
-exact long-context needles, reached a 96.92 reasoning score across 50,986
-completion tokens, and used at most 10 of 24 Mamba entries.
-
-### 27B real agentic context behavior
-
-The dated 124-request sample covered 85,156 output tokens and inputs from 183
-to 350,195 tokens. [RESULTS.md](RESULTS.md) preserves the context-band tables,
-overlap treatment, and distinction between completed-request and instantaneous
-telemetry measurements.
-
-Detailed definitions, complete 27B context bands, both 27B campaigns, and
-persistence evidence are in [RESULTS.md](RESULTS.md).
-
 ## HiCache/NIXL persistence
 
 HiCache/NIXL provides reusable prefix state across GPU/host eviction and
@@ -377,22 +288,8 @@ GPU radix state
   -> NIXL POSIX FILE storage, io_uring + O_DIRECT
 ```
 
-Flash-Next restart evidence:
-
-- 63,808 of 63,864 input tokens restored; 56 recomputed.
-- 489,856 of 489,879 restored; 23 recomputed.
-- all three needles exact after restart.
-
-The earlier 27B work also demonstrated 518,528 restored tokens with a six-token
-tail in 14.64 seconds, 60,032-token namespace reuse after restart, A→B→A page-
-size namespace rollback, three concurrent ~60K restores, and a 775,168-token
-three-request concurrent restore with only 320 tail/page-rounding tokens
-computed.
-
-Two portable NIXL fixes from this project remain open upstream: PR #36520
-isolates overlapping path registrations, and PR #36524 bounds bounce-backed
-hybrid transfers. Flash-Next adds complete PLE/GDN/QSA sibling-state persistence
-and load/COW ordering. [MEMORY-AND-PERSISTENCE.md](MEMORY-AND-PERSISTENCE.md)
+For restart and cache-restoration measurements on both models, see
+[the benchmark history](RESULTS.md). [Memory and persistence](MEMORY-AND-PERSISTENCE.md)
 explains cache namespaces and how restoration works.
 
 ## Build and launch
@@ -447,14 +344,6 @@ for other users' setups, and [LIMITATIONS.md](LIMITATIONS.md) for known issues.
 - [LIMITATIONS.md](LIMITATIONS.md) — known issues and hardware considerations.
 - [`jpezzulli/pennyroyal-validation`](https://github.com/jpezzulli/pennyroyal-validation)
   — maintained public validation harness and result catalog.
-
-## Engineering history
-
-The experimental path—including DFlash2 work and the HiCache/Mooncake/NIXL
-detour—is described at
-[msoexpert.com](https://msoexpert.com/articles/qwen38-dflash2-rtx-pro-6000/).
-Mooncake was evaluated and removed. The runtime now uses NIXL POSIX for
-persistent prefix storage.
 
 ## License
 
