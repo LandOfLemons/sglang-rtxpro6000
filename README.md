@@ -50,8 +50,9 @@ then check the API as described in the [launch guide](RUN.md#smoke-through-the-n
 
 ## Prebuilt Docker image for Qwen3.8 on RTX PRO 6000
 
-The **v2.5.2 image is available** at
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2`. It includes the runtime,
+The v2.5.3 release image is named
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. Images are published after the
+release build passes its checks. The image includes the runtime,
 CUDA build tools, and NIXL for both supported profiles. You supply the NVIDIA
 driver, model files, and writable cache folders on the host.
 
@@ -104,23 +105,21 @@ are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
 
 <a id="current-release--pennyroyal-v251"></a>
 
-## Current release — Pennyroyal v2.5.2
+## Current release — Pennyroyal v2.5.3
 
-**v2.5.2 brings lower memory overhead, cache fixes, and easier setup.**
+**v2.5.3 fixes the Flash-Next checkpoint bug and includes the BF16 NVMe PLE hotfix.**
 
-- Flash-Next uses less temporary GPU memory during loading and long prefills,
-  and avoids oversized pinned-RAM allocations for its PLE table.
-- HiCache reclaims only the space it needs. Choose your HiCache RAM size and
-  set a NIXL disk-cache budget, including smaller caches on shared systems.
-- The optional **[beta configurator](CONFIGURE.md)** provides numbered
-  choices, explanations, and saved settings for native and
-  [container installs](docker/pennyroyal/README.md).
-- TP2 work adds shared FR-Spec weights, separate NIXL namespaces and startup
-  guidance. **TP2 verification is pending from
-  [u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).**
+- Corrects the native MTP checkpoint selection behind the phantom-token and
+  file-writing problem reported in [issue #17](https://github.com/jpezzulli/sglang-rtxpro6000/issues/17).
+- Includes the fix for Swift's BF16 NVMe PLE staging error, so v2.5.3 does not
+  need the separate patch.
+- Streams long string tool arguments as they are generated, improves cache
+  persistence, and adds startup warnings when the cache filesystem is under pressure.
+- Adds parallel encoding for eligible long prompts and a small DFlash2
+  prefill-copy improvement.
 
-The existing model profiles, C6 option and performance tables remain.
-See [changes and upstream credits](CHANGES.md#v252--memory-cache-and-setup-maintenance)
+The two model profiles, setup utility and existing performance tables remain.
+See [changes and upstream credits](CHANGES.md#v253--agentic-correctness-and-cache-maintenance)
 or [get started](docker/pennyroyal/README.md).
 
 <a id="current-release--pennyroyal-v250"></a>
@@ -289,7 +288,7 @@ If you publish work that uses or builds on Pennyroyal, please link the
 canonical repository and identify the release tag or commit you started from:
 
 - [jpezzulli/sglang-rtxpro6000](https://github.com/jpezzulli/sglang-rtxpro6000)
-- Current release: [`pennyroyal-v2.5.2`](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.2)
+- Current release: [`pennyroyal-v2.5.3`](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.3)
 
 A short note distinguishing the Pennyroyal source or technique from your own
 changes helps readers reproduce the lineage, understand what you improved, and
@@ -297,8 +296,8 @@ find both projects.
 
 ## Published identity
 
-The current release is **[Pennyroyal v2.5.2](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.2)**,
-tag `pennyroyal-v2.5.2`. The default branch is `pennyroyal-main-sm120-final`.
+The current release is **[Pennyroyal v2.5.3](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.3)**,
+tag `pennyroyal-v2.5.3`. The default branch is `pennyroyal-main-sm120-final`.
 [PROVENANCE.md](PROVENANCE.md) records source and checkpoint identities;
 [BUILD.md](BUILD.md#qualified-environment) lists the tested dependencies.
 The former `jpezzulli/qwen38-dflash2-pro6000` URL redirects here.

@@ -56,7 +56,7 @@ PROFILE_LABEL = {
 # an INT and the host pool sizes itself at host_size * 1e9 bytes), not GiB.
 PROFILE_HICACHE_SIZE_GB = {"next": "32", "next-plain": "32", "27b": "96"}
 CONTAINER_MODELS_TARGET = "/models"
-DEFAULT_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2"
+DEFAULT_IMAGE = "ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3"
 COMPOSE_RELPATH = "docker/pennyroyal/compose.yaml"
 NATIVE_CONFIG_RELPATH = ".config/pennyroyal/pennyroyal.env"
 RECIPE_DIR_RELPATH = "configs/pennyroyal"

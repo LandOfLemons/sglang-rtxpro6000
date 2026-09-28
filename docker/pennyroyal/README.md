@@ -1,15 +1,16 @@
 # Pennyroyal container
 
-This Compose service runs the same Pennyroyal v2.5.2 source and launch recipes
+This Compose service runs the same Pennyroyal v2.5.3 source and launch recipes
 as the native installation. The default is Flash-Next with FR-Spec. Native
 installation remains supported and is documented in [`BUILD.md`](../../BUILD.md)
 and [`RUN.md`](../../RUN.md).
 
-The prebuilt image is available at
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2`. It includes Python, the CUDA
+The release image is named
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. It includes Python, the CUDA
 toolchain, NIXL POSIX, and prebuilt FlashInfer kernels. The host supplies the
 NVIDIA driver and model files. Follow the setup below; Compose will pull the
-image when you start it.
+image when you start it. Release images become available after the build
+and CPU installation checks pass.
 
 ## Prerequisites
 
@@ -50,7 +51,7 @@ replace this setting.
 Get the matching launch and Compose files from the release tag:
 
 ```bash
-git clone --depth 1 --branch pennyroyal-v2.5.2 \
+git clone --depth 1 --branch pennyroyal-v2.5.3 \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 ```
@@ -192,8 +193,8 @@ The entrypoint exposes two non-serving checks. The CPU-only import check skips
 device work:
 
 ```bash
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2 --help
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2 --check
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --help
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --check
 ```
 
 Arbitrary commands require the explicit `exec` boundary:
@@ -202,7 +203,7 @@ Arbitrary commands require the explicit `exec` boundary:
 docker compose run --rm pennyroyal exec .venv/bin/python --version
 ```
 
-The v2.5.2 image build runs the automated CPU installation check shown above.
+Release image builds run the automated CPU installation check shown above.
 Both profiles were regression-tested natively on the release source. The fresh
 container GPU qualification remains the v2.5.0 result: both profiles passed API
 schema/tool checks, 64K prefill, 1,024-token C1/C4 decode, JPEG and static-video
@@ -343,8 +344,8 @@ read-only. Omit the override when the engine does not enforce SELinux labels.
 ## Release builds
 
 Publishing a GitHub release builds its exact tagged source and uploads the
-matching versioned image automatically. For example, `pennyroyal-v2.5.2`
-produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2`. Draft releases and ordinary
+matching versioned image automatically. For example, `pennyroyal-v2.5.3`
+produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. Draft releases and ordinary
 branch pushes do not publish a release image. No moving `latest` tag is used.
 
 The build checks package versions, the source revision and import location,

@@ -1,5 +1,8 @@
 # Fix Swift's NVMe PLE error in Pennyroyal v2.5.2
 
+**For v2.5.2 only. Pennyroyal v2.5.3 includes this fix; do not apply the
+separate patch to v2.5.3.**
+
 If Swift loads but fails on a request with `PLE lookup needs ... staging rows`,
 this fix gives its larger BF16 PLE table enough working space. You do not need
 to rebuild Docker or download the model again. Other models using FP8 PLE keep

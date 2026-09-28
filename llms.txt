@@ -4,6 +4,10 @@
 
 Canonical repository: https://github.com/jpezzulli/sglang-rtxpro6000
 
+Version 2.5.3 includes the Flash-Next checkpoint correction and BF16 NVMe PLE
+staging hotfix. The separate v2.5.2 PLE patch is not needed on v2.5.3. See
+CHANGES.md for streaming-tool, prompt-encoding and cache improvements.
+
 Both profiles use the same runtime source. The documented recipes use one GPU
 and thinking-enabled agentic inference. Start with the Docker guide for a
 prebuilt image or BUILD.md and RUN.md for native installation. Model weights
