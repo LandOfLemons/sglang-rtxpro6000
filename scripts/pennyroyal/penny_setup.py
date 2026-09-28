@@ -138,6 +138,7 @@ _BASIC_ORDER = ("REPO_ROOT", "VENV_PATH", "COMPOSE_FILE", "PENNYROYAL_IMAGE",
                 "SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "PENNY_HICACHE_SIZE_GB")
 _ADVANCED_ORDER = ("USER_ID", "GROUP_ID", "PENNY_PLE_BACKEND",
                    "PENNY_PLE_NVME_MODEL", "SGLANG_SM120_ONLINE_MXFP8",
+                   "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
                    "SGLANG_MM_PREPROCESS_DEVICE", "SGLANG_FORWARD_UNKNOWN_TOOLS",
                    "MAX_RUNNING_REQUESTS", "MAX_MAMBA_CACHE_SIZE",
                    "MAX_TOTAL_TOKENS", "PENNY_BUILD_JOBS", "NIXL_PREFIX")
@@ -195,6 +196,10 @@ _EXPLANATIONS = {
     "PENNY_PLE_NVME_MODEL": "the prepared NVMe snapshot folder, when PLE lives "
                             "on NVMe",
     "SGLANG_SM120_ONLINE_MXFP8": "read the FP8 guide before switching this on",
+    "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "allocate the RAM cache's host buffers "
+                                         "as pinned host memory, the workaround "
+                                         "for HiCache transfers under WSL2; "
+                                         "leave it off on native Linux",
     "SGLANG_FORWARD_UNKNOWN_TOOLS": "pass tool names this build does not know "
                                     "through to the model",
     "MAX_RUNNING_REQUESTS": "how many requests are admitted at once; leaving "

@@ -193,6 +193,23 @@ This page covers the native launchers. For the container
 path, use [`docker/pennyroyal`](docker/pennyroyal/README.md); other Docker files
 inherited from upstream serve their upstream purposes.
 
+## WSL2 host-memory workaround
+
+For WSL2, enable the pinned-memory workaround before launching either profile
+directly with its recipe:
+
+```bash
+export SGLANG_HICACHE_TORCH_PINNED_ALLOC=true
+```
+
+This addresses illegal memory accesses during HiCache transfers caused by
+WSL2's handling of CUDA host-memory pointers. It is off by default; leave it
+off on native Linux. If you use `run-penny` with a saved configuration, set
+`SGLANG_HICACHE_TORCH_PINNED_ALLOC=true` in that file: saved settings take
+precedence over shell exports. In the beta configurator, choose **WSL2
+host-memory workaround** under **Advanced**. For Docker Compose, set the same variable in
+your `.env` file using the [container instructions](docker/pennyroyal/README.md#wsl2).
+
 ## Startup checks
 
 Each recipe prints the requested profile, memory, cache, and media settings

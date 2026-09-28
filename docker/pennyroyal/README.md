@@ -227,6 +227,20 @@ docker compose up -d --force-recreate
 Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
 `SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default.
 
+### WSL2
+
+Enable the HiCache host-memory workaround by adding this to `.env`:
+
+```dotenv
+SGLANG_HICACHE_TORCH_PINNED_ALLOC=true
+```
+
+The beta configurator also offers **WSL2 host-memory workaround** under
+**Advanced**. It is off by default; leave it off on native Linux. Recreate an
+existing container after changing the setting, using the command above.
+
+### Other settings
+
 `PENNY_REASONING_EFFORT` is a launcher-level convenience (PR#18): unset
 (default) keeps the recipes' `medium` default chat-template
 kwargs, and `none|minimal|low|medium|high|xhigh|max` rewrites just that

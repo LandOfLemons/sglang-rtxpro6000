@@ -24,6 +24,10 @@ services:
       NIXL_STORAGE_BASE: /nixl
       SGLANG_HICACHE_NIXL_MAX_CACHE_GB: ${SGLANG_HICACHE_NIXL_MAX_CACHE_GB:-0}
       PENNY_HICACHE_SIZE_GB: ${PENNY_HICACHE_SIZE_GB:-}
+      # WSL2 host-memory workaround: true allocates the HiCache host pool with
+      # torch's pinned-memory allocator instead of cudaHostRegister'd mmap.
+      # Off (the default) keeps the native-Linux allocator.
+      SGLANG_HICACHE_TORCH_PINNED_ALLOC: ${SGLANG_HICACHE_TORCH_PINNED_ALLOC:-false}
       PENNY_PLE_BACKEND: ${PENNY_PLE_BACKEND:-ram}
       PENNY_PLE_NVME_MODEL: ${PENNY_PLE_NVME_MODEL:-/models/flash-next-ple}
       SGLANG_SM120_ONLINE_MXFP8: ${SGLANG_SM120_ONLINE_MXFP8:-false}

@@ -121,6 +121,11 @@ SHARED_KEYS: tuple[KeySpec, ...] = (
             "positive-int",
             prompt="RAM (HiCache) cache size in GB (1 GB = 1e9 bytes, not GiB; "
                    "blank = the recipe's default for this profile)"),
+    KeySpec("SGLANG_HICACHE_TORCH_PINNED_ALLOC",
+            "pinned host memory for HiCache transfers under WSL2 (off keeps "
+            "the default host-register allocator)",
+            "bool", default="false", advanced=True,
+            prompt="WSL2 host-memory workaround (true or false)"),
     KeySpec("PENNY_PLE_BACKEND", "PLE table placement", "choice", ("ram", "nvme"),
             default="ram", advanced=True,
             prompt="PLE placement (ram or nvme)"),
@@ -813,6 +818,7 @@ def _plan_native(config: Config, environ: dict[str, str],
                  "SGLANG_FORWARD_UNKNOWN_TOOLS", "MAX_RUNNING_REQUESTS",
                  "MAX_MAMBA_CACHE_SIZE", "MAX_TOTAL_TOKENS",
                  "SGLANG_HICACHE_NIXL_MAX_CACHE_GB", "PENNY_HICACHE_SIZE_GB",
+                 "SGLANG_HICACHE_TORCH_PINNED_ALLOC",
                  "PENNY_BUILD_JOBS", "NIXL_PREFIX"):
         _adopt(plan, config, environ, name)
     gpu = _adopt(plan, config, environ, "GPU") or "0"
@@ -955,6 +961,7 @@ def _plan_container(config: Config, environ: dict[str, str],
     _adopt(plan, config, environ, "MAX_TOTAL_TOKENS")
     _adopt(plan, config, environ, "SGLANG_HICACHE_NIXL_MAX_CACHE_GB")
     _adopt(plan, config, environ, "PENNY_HICACHE_SIZE_GB")
+    _adopt(plan, config, environ, "SGLANG_HICACHE_TORCH_PINNED_ALLOC")
     _adopt(plan, config, environ, "USER_ID")
     _adopt(plan, config, environ, "GROUP_ID")
     # The saved names are the variables the Compose file already reads, so no
