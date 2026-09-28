@@ -11,8 +11,9 @@ model configurations run from the same patched source.
 **Get running:** [Use the prebuilt container](docker/pennyroyal/README.md)
 for the shortest setup, or [build and install natively](BUILD.md).
 Both paths support the two model profiles below.
-An optional [terminal setup utility **(beta)**](CONFIGURE.md) walks through your model,
-GPU, and cache settings; manual configuration remains available.
+The manual instructions in both guides are confirmed working. An optional
+[terminal setup utility **(beta)**](CONFIGURE.md) is open for testing;
+please [report any issues](https://github.com/jpezzulli/sglang-rtxpro6000/issues).
 
 **Stay updated:** choose **Watch → Custom → Releases** at the top of this
 repository to get notified about new Pennyroyal releases.
@@ -299,10 +300,13 @@ Choose one installation path:
 1. **[Docker and Compose](docker/pennyroyal/README.md)** for the prebuilt image.
 2. **[Native installation](BUILD.md)** to build and run from source.
 
-Then use the **[beta configurator](CONFIGURE.md)** to save and check your
-model, GPU, and cache settings. Start the server with the launch command it
-gives you. Both installation guides also provide a manual path. Run one model
+The manual setup and launch instructions in both guides are confirmed working.
+Follow your chosen guide to configure and start the server. Run one model
 profile at a time on a single GPU.
+
+The optional **[beta configurator](CONFIGURE.md)** is open for testing. It
+walks through model, GPU, and cache settings and generates a launch command.
+If you try it, please [report any issues](https://github.com/jpezzulli/sglang-rtxpro6000/issues).
 
 ## Source changes and upstream work
 
