@@ -183,20 +183,44 @@ def delta(current, previous):
     return '—' if previous is None else f'{current - previous:+,}'
 
 
+def traffic_status(today, rolling, days):
+    """Judge live freshness from the returned API window, never the collection timestamp.
+
+    The current response and the merged archive are reported separately: an archive can
+    hold newer days than the API currently returns, and that is not a missing archive day.
+    """
+    live_day, recorded_through = max(rolling['views']['days']), max(days)
+    for day in (live_day, recorded_through):
+        require(dt.date.fromisoformat(day) <= today, f'Traffic data is dated in the future: {day}')
+    stale = dt.date.fromisoformat(live_day) < today - dt.timedelta(days=1)
+    missing = (list(dates(live_day, (today - dt.timedelta(days=1)).isoformat()))[1:]
+               if stale else [])
+    return {'live_day': live_day, 'recorded_through': recorded_through, 'stale': stale,
+            'missing': missing, 'unrecorded': [day for day in missing if day not in days],
+            'age_days': (today - dt.date.fromisoformat(recorded_through)).days}
+
+
+def span(days):
+    return days[0] if len(days) == 1 else f'{days[0]} through {days[-1]}'
+
+
 def report(github, branch):
     head, traffic, package, metrics = read_archive(github, branch)
     rolling = live_traffic(github)
     days = current_days(traffic, rolling)
-    latest_day = max(days)
+    today = now().date()
+    status = traffic_status(today, rolling, days)
+    latest_day = status['recorded_through']
     latest = days[latest_day]
+    partial_today = latest_day == today.isoformat()
     totals = {
         'views': sum(row['views']['count'] for row in days.values()),
         'clones': sum(row['clones']['count'] for row in days.values()),
         'daily_unique_visitors': sum(row['views']['uniques'] for row in days.values()),
         'daily_unique_cloners': sum(row['clones']['uniques'] for row in days.values()),
     }
-    _, adoption = latest_metric(metrics, ('stars', 'forks'), 'adoption')
-    _, package_latest = latest_metric(package, ('total_downloads',), 'package')
+    adoption_day, adoption = latest_metric(metrics, ('stars', 'forks'), 'adoption')
+    package_day, package_latest = latest_metric(package, ('total_downloads',), 'package')
     referrers = top_rows(github.api('traffic/popular/referrers?per=day'), 'referrer', 'referrer')
     paths = top_rows(github.api('traffic/popular/paths?per=day'), 'path', 'path')
     snapshot_prior = previous_snapshot_counts(github, head)
@@ -209,29 +233,58 @@ def report(github, branch):
     prior = {
         **previous_metric(metrics, ('stars', 'forks')),
         'package_downloads': previous_metric(package, ('total_downloads',))['total_downloads'],
-        'views': totals['views'] - latest['views']['count'],
-        'clones': totals['clones'] - latest['clones']['count'],
-        'daily_unique_cloners': totals['daily_unique_cloners'] - latest['clones']['uniques'],
     }
-    lines = [
-        'Pennyroyal daily GitHub report', '',
-        f'Data through: {latest_day} UTC. Archive commit: {head[:12]}.',
-        f'Rolling window: {min(rolling["views"]["days"])} through {max(rolling["views"]["days"])} UTC.', '',
-        'Adoption',
+    # Cumulative traffic carries no delta: the only "increase" available without a
+    # previous day of exposure is the latest day's own counts, which reads as growth
+    # even when GitHub returned nothing new. Daily activity below carries counts.
+    window = sorted(rolling['views']['days'])
+    lines = ['Pennyroyal daily GitHub report', '']
+    if status['stale']:
+        missing, unrecorded = status['missing'], status['unrecorded']
+        covered = [day for day in missing if day not in unrecorded]
+        if not covered:
+            gap = '; none of them is recorded in the archive.'
+        elif unrecorded:
+            gap = (f'; the archive records {span(covered)} UTC but not '
+                   f'{span(unrecorded)} UTC.')
+        else:
+            gap = f'; the archive already records {span(covered)} UTC.'
+        lines += [
+            f'WARNING: the current GitHub traffic response returned no day after '
+            f'{status["live_day"]} UTC,',
+            f'{len(missing)} day(s) are absent from the current API response '
+            f'({span(missing)} UTC)' + gap, '',
+        ]
+    lines += [
+        f'Data through: {latest_day} UTC'
+        + (" (today's bucket is partial; collection is still in progress)."
+           if partial_today else '.'),
+        f'Newest day in the current API response: {status["live_day"]} UTC.',
+        f'Archive commit: {head[:12]}.',
+        f'Rolling window GitHub returned: {window[0]} through {window[-1]} UTC.',
+        '  A returned window only proves what GitHub exposed; unexposed dates are not zero traffic.', '',
+        f'Adoption (stars/forks recorded {adoption_day} UTC)',
         f'- Stars: {values["stars"]:,} ({delta(values["stars"], prior.get("stars"))})',
         f'- Forks: {values["forks"]:,} ({delta(values["forks"], prior.get("forks"))})',
         f'- Container downloads: {values["package_downloads"]:,} '
-        f'({delta(values["package_downloads"], prior.get("package_downloads"))})', '',
-        'Traffic since launch',
-        f'- Views: {values["views"]:,} ({delta(values["views"], prior.get("views"))} on {latest_day})',
-        f'- Clones: {values["clones"]:,} ({delta(values["clones"], prior.get("clones"))} on {latest_day})',
-        f'- sum_of_daily_unique_cloners: {values["daily_unique_cloners"]:,} '
-        f'({delta(values["daily_unique_cloners"], prior.get("daily_unique_cloners"))} on {latest_day})',
-        '  GitHub does not expose a deduplicated lifetime cloner count.', '',
-        f'{latest_day} activity',
+        f'({delta(values["package_downloads"], prior.get("package_downloads"))}), '
+        f'recorded {package_day} UTC', '',
+        f'Traffic since launch (cumulative over all recorded days, '
+        f'recorded through {latest_day} UTC)',
+        f'- Views: {values["views"]:,}',
+        f'- Clones: {values["clones"]:,}',
+        f'- sum_of_daily_unique_cloners: {values["daily_unique_cloners"]:,}',
+        '  GitHub does not expose a deduplicated lifetime cloner count.'
+        + (' Traffic totals include only the recorded dates above; the current API '
+           'response is stale.' if status['stale'] else ''), '',
+        f'{latest_day} activity'
+        + (" (partial UTC day so far; GitHub can still revise it)" if partial_today else
+           f' (last recorded day, {status["age_days"]} day(s) old; historical)'
+           if status['age_days'] > 1 else
+           ' (latest completed UTC day; GitHub can still revise counts)'),
         f'- Views: {latest["views"]["count"]:,} from {latest["views"]["uniques"]:,} daily unique visitors',
         f'- Clones: {latest["clones"]["count"]:,} from {latest["clones"]["uniques"]:,} daily unique cloners', '',
-        'Current rolling window',
+        'Rolling window returned by GitHub (window totals, not a freshness signal)',
         f'- Views: {rolling["views"]["total"]["count"]:,}; unique visitors: {rolling["views"]["total"]["uniques"]:,}',
         f'- Clones: {rolling["clones"]["total"]["count"]:,}; unique cloners: {rolling["clones"]["total"]["uniques"]:,}', '',
         'Top referrers',
@@ -241,18 +294,35 @@ def report(github, branch):
             return '—'
         prior_row = snapshot_prior[kind].get(name)
         if prior_row is None:
-            return 'new'
-        return f'{delta(count, prior_row["count"])} views, {delta(uniques, prior_row["uniques"])} uniques'
+            return 'new to returned top list'
+        return (f'{delta(count, prior_row["count"])} views, '
+                f'{delta(uniques, prior_row["uniques"])} uniques')
+
+    def snapshot_note():
+        note = ('  Deltas compare the previous archived rolling-window snapshot, not daily '
+                'activity; the referrer/path response itself reports no source timestamp.')
+        if status['stale']:
+            note += (' While daily traffic is stale that snapshot may itself be old, so a +0 '
+                     'delta does not prove there was no new traffic.')
+        return note
 
     lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors '
               f'({snapshot_delta("referrers", name, count, uniques)})'
               for name, count, uniques in referrers] or ['- None returned by GitHub']
-    lines += ['', 'Top paths']
+    lines += [snapshot_note(), '', 'Top paths']
     lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors '
               f'({snapshot_delta("paths", name, count, uniques)})'
               for name, count, uniques in paths] or ['- None returned by GitHub']
-    lines += ['', f'https://github.com/{github.repository}/tree/{branch}']
-    return '\n'.join(lines) + '\n', values
+    lines += [snapshot_note(), '', f'https://github.com/{github.repository}/tree/{branch}']
+    return '\n'.join(lines) + '\n', values, status
+
+
+def subject_line(local_date, status):
+    subject = f'Pennyroyal daily GitHub report — {local_date}'
+    if status['stale']:
+        subject = (f'WARNING stale traffic, newest returned day {status["live_day"]} '
+                   f'(recorded through {status["recorded_through"]}) — {subject}')
+    return subject
 
 
 def main():
@@ -265,9 +335,10 @@ def main():
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
     local_date = now().astimezone(ZoneInfo(args.timezone)).date().isoformat()
-    body, _ = report(GitHub(args.repository, 'archive-traffic.yml'), args.history_branch)
-    subject = f'Pennyroyal daily GitHub report — {local_date}'
+    body, _, status = report(GitHub(args.repository, 'archive-traffic.yml'), args.history_branch)
+    subject = subject_line(local_date, status)
     if args.dry_run:
+        print(f'Subject: {subject}')
         print(body, end='')
         return
     result = subprocess.run([args.mail_command, '-s', subject, args.recipient], input=body,

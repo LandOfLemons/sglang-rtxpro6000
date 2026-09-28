@@ -167,9 +167,34 @@ startup; data absent from GitHub's retention window cannot be reconstructed.
 
 The report uses the existing host `mail` → `msmtp` sender. It keeps no local
 report state or report history; it reads GitHub at send time. Its report includes
-adoption/package deltas, launch totals, daily and rolling traffic, referrers and
-popular paths. Daily unique sums are labeled honestly and never presented as a
-deduplicated lifetime-person count.
+adoption/package observations with their own recorded dates, cumulative launch
+totals, daily and returned-window traffic, referrers and popular paths. Daily
+unique sums are labeled honestly and never presented as a deduplicated
+lifetime-person count.
+
+Report freshness is judged from the daily dates in the **current** traffic API
+response, never from the archive `collected_at` timestamp. A report is fresh when the
+newest returned day is yesterday UTC; when the newest day is today UTC it is labeled a
+partial bucket, and the newest completed day is never called "complete" because GitHub
+can still revise recent values. When the current response stops before yesterday UTC, the
+email is still sent, but the subject is prefixed `WARNING stale traffic, newest returned
+day <date> (recorded through <date>)` and the body leads with a WARNING naming the newest
+returned day, the exact days absent from that response through yesterday, and which of
+those the archive already records versus which remain unrecorded. The current response
+date and the merged `recorded through` date are labeled separately, so a regressed live
+window never claims archived dates are missing. Cumulative traffic lines carry no
+`(+N on <date>)` delta, because repeating the newest day's counts reads as growth when
+nothing new was exposed; daily activity lines carry the counts, and the cumulative
+section says it is recorded through that date rather than implying today's traffic.
+Adoption and package lines keep their own observation dates and deltas. Rolling totals
+are labeled as the window GitHub returned, and one line under referrers and one under
+paths state that those deltas compare the previous archived rolling-window snapshot,
+not daily activity, that the response itself carries no source timestamp, and that
+while daily traffic is stale a `+0` delta does not prove there was no new traffic;
+`new to returned top list` never means a new site. Collection failures (a capture
+before the 00:17 UTC cutoff, malformed or incomplete archives, future-dated days) still
+fail loudly and skip the email. `--dry-run` prints the subject and the body and sends
+nothing.
 
 Installed locations:
 
