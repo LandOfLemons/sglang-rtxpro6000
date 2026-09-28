@@ -48,16 +48,17 @@ replace this setting.
 
 ## Get the Compose files
 
-Get the matching launch and Compose files from the release tag:
+Get the launch and Compose files, including the WSL2 setup update:
 
 ```bash
-git clone --depth 1 --branch pennyroyal-v2.5.3 \
+git clone --depth 1 --branch pennyroyal-v2.5.3-setup1 \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 ```
 
-This checkout supplies configuration and documentation; Docker pulls the
-prebuilt image; no local SGLang build is involved.
+The `setup1` tag updates configuration and documentation for the same v2.5.3
+image. Docker pulls the prebuilt image; no local SGLang build is involved.
+Already have a v2.5.3 checkout? [Update the setup files](../../CONFIGURE.md#update-the-setup-files).
 
 ## Guided setup
 

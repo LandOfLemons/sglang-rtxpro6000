@@ -29,7 +29,7 @@ Run this sequence in Bash. It creates a new checkout and Python environment,
 installs the build tools, then installs SGLang and its dependencies once:
 
 ```bash
-git clone --branch pennyroyal-v2.5.3 --single-branch \
+git clone --branch pennyroyal-v2.5.3-setup1 --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 
@@ -46,7 +46,8 @@ uv pip install --prerelease=allow --index-strategy unsafe-best-match \
   --no-build-isolation -e python
 ```
 
-SGLang is now installed as an editable package from this checkout. Keep the
+The `setup1` tag includes the WSL2 configurator update and the same v2.5.3
+runtime. SGLang is installed as an editable package from this checkout. Keep the
 checkout in place while using this environment.
 
 Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
@@ -65,8 +66,8 @@ named `origin`.
 
 ```bash
 cd /path/to/pennyroyal
-git fetch origin tag pennyroyal-v2.5.3
-git switch --detach pennyroyal-v2.5.3
+git fetch origin tag pennyroyal-v2.5.3-setup1
+git switch --detach pennyroyal-v2.5.3-setup1
 source .venv/bin/activate
 
 source scripts/pennyroyal/build-env.sh

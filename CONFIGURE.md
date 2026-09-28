@@ -7,6 +7,21 @@ plain text file that the launchers read. It writes that file and tells you
 what to run next; it does not install packages, download models, or start
 anything.
 
+## Update the setup files
+
+The `pennyroyal-v2.5.3-setup1` tag adds the WSL2 option to the configurator and
+passes it through Docker Compose. It uses the same v2.5.3 runtime and image.
+
+If you already cloned v2.5.3, run these from your Pennyroyal folder. Save any
+changes to tracked files first; your saved settings stay in place.
+
+```bash
+git fetch origin tag pennyroyal-v2.5.3-setup1
+git switch --detach pennyroyal-v2.5.3-setup1
+```
+
+Then rerun the configurator if you want to enable the WSL2 option.
+
 ## Before you start
 
 - Native: finish the install in [BUILD.md](BUILD.md) and download your model
