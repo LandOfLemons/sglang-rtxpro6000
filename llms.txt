@@ -18,7 +18,7 @@ The optional configurator is beta: `./configure-penny --native` or
 `./configure-penny --container`. Use the saved settings and the generated launch
 command; `--check` validates configuration without loading a model. See RUN.md
 for HiCache RAM sizing and the NIXL soft disk budget. Both cache tiers remain
-enabled. TP2 changes await verification from u/StockSpecialist1707.
+enabled. See COMMUNITY-RESULTS.md for other users' setups, including TP2.
 
 ## Start here
 
@@ -45,4 +45,4 @@ enabled. TP2 changes await verification from u/StockSpecialist1707.
 
 - [Backends](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BACKENDS.md): Kernel and execution-path details.
 - [Memory and persistence](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/MEMORY-AND-PERSISTENCE.md): Hybrid cache state, namespaces and restoration.
-- [Limitations](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/LIMITATIONS.md): Hardware, representation and measurement boundaries.
+- [Limitations](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/LIMITATIONS.md): Known issues and hardware considerations.

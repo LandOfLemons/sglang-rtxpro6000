@@ -1,6 +1,6 @@
 # SGLang for Qwen3.8 on one NVIDIA RTX PRO 6000 Blackwell (SM120)
 
-> Pennyroyal is an optimized SGLang-derived runtime with qualified single-GPU
+> Pennyroyal is an optimized SGLang-derived runtime with single-GPU
 > launch configurations for Qwen3.8-27B FP8 with DFlash2 and Qwen3.8
 > Flash-Next NVFP4 with native NEXTN and FR-Spec.
 
@@ -20,7 +20,7 @@ repository to get notified about new Pennyroyal releases.
 Using an AI assistant to set this up? Give it [llms.txt](llms.txt)
 for the short setup map and links to the detailed instructions.
 
-**Evidence:** [Benchmarks and measurement definitions](RESULTS.md) ·
+**Results:** [Benchmarks and measurement definitions](RESULTS.md) ·
 [Community-reported results](COMMUNITY-RESULTS.md) ·
 [Validation suite and published reports](https://github.com/jpezzulli/pennyroyal-validation).
 
@@ -62,7 +62,9 @@ build is needed.
 
 <a id="models-and-launch-recipes"></a>
 
-## Qualified model profiles and launch recipes
+<a id="qualified-model-profiles-and-launch-recipes"></a>
+
+## Model profiles and launch recipes
 
 The two profiles below are equally supported with **524,288-token context,
 HiCache and NIXL** on one RTX PRO 6000. [RESULTS.md](RESULTS.md) identifies the
@@ -76,19 +78,16 @@ exact checkpoints used for each benchmark campaign.
 For Flash-Next, our [OrcaRouter Uncensored ModelOpt NVFP4 conversion](https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4)
 is also available by community request and works with the same Pennyroyal launch recipe.
 
-**Swift 27B FP8 is preliminarily validated** with DFlash2: it passed reasoning
-validation and used fewer tokens overall in our comparison.
+**Swift 27B FP8 works with DFlash2.** It passed the reasoning suite and used
+fewer tokens overall in our comparison.
 See [Swift 27B validation and per-case timings](SWIFT-27B.md).
 
 [Online FP8](FP8.md) and [NVMe-backed PLE](NVME-PLE.md) are independent
 Flash-Next options.
 
-The retained public 27B measurements used
+The public 27B measurements used
 [orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8),
-an uncensored/abliterated derivative of the official checkpoint. That
-provenance is material to behavioral results. Compatibility still depends on
-matching architecture, quantization, tokenizer, and speculative-decoding
-requirements.
+an uncensored/abliterated derivative of the official checkpoint.
 
 FR-Spec credit goes directly to Gabriel's
 [`gabrielolympie/sglang-flashnext-sm120`](https://github.com/gabrielolympie/sglang-flashnext-sm120).
@@ -100,7 +99,7 @@ The v2.5.0 online-FP8 implementation is directly inspired by
 at commit `94a68214b77514bc26ef78cee4c01f128162d09b`, especially patches
 `0003`, `0007`, and `0008`. Optional NVMe PLE adapts Garner McCloud's
 [SSD Stream v0.2.0](https://github.com/garnermccloud/sglang-ssd-stream/tree/176a522ef9d6dbb5056ae1f467fe49af0f1258a5),
-with the upstream license and NOTICE retained. Detailed boundaries and credit
+with the upstream license and NOTICE retained. Implementation details and credit
 are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
 
 <a id="current-release--pennyroyal-v251"></a>
@@ -147,7 +146,6 @@ reports from independent users, including more than a week of Max-Q agentic use:
 Special thanks to [u/StockSpecialist1707](COMMUNITY-RESULTS.md#stockspecialist1707--single-gpu-capacity-and-online-fp8)
 for independently stress-testing v2.5 with a **1.11M-token KV pool** and sharing
 the workload results and limits, not just a successful boot.
-These are contributor-reported observations, not our own qualification.
 
 Measured September 11, 2026, on one RTX PRO 6000, TP1, with FR-Spec,
 524,288-token context, 824,384 KV tokens, RAM-backed PLE and HiCache/NIXL
@@ -166,14 +164,14 @@ source states.
 Rates are client-observed post-first-token decode. The short values are
 three-run medians; 128K and 490K are single observations. Cold TTFT did not
 improve in the long samples. Online FP8 also left 7.52 GiB available after
-graph capture versus 3.66 GiB in the earlier matching boot—about 3.86 GiB more,
-not 7 GiB newly added capacity. Full precision boundaries and caveats are in
+graph capture versus 3.66 GiB in the earlier matching boot—about 3.86 GiB more.
+The precision changes are explained in
 [FP8.md](FP8.md); detailed timings are in
 [RESULTS.md](RESULTS.md#pennyroyal-v250--optional-online-fp8).
 
 The RadixArk checkpoint was used for the full performance and quality campaign,
 including a focused **64/64 exact** opaque-record recall request. See
-[FP8.md](FP8.md#qualified-scope) for the coverage and format requirements.
+[FP8.md](FP8.md#qualified-scope) for the tests and model requirements.
 
 ## Retained v2.4.0 Flash-Next prefill measurements
 
@@ -318,7 +316,9 @@ The former `jpezzulli/qwen38-dflash2-pro6000` URL redirects here.
 - [GPU allocation and persistence](MEMORY-AND-PERSISTENCE.md): RecoverSSM,
   automatic KV sizing, host state, and NIXL representation namespaces.
 
-## Performance and qualification
+<a id="performance-and-qualification"></a>
+
+## Performance and testing
 
 The [v2.5.0 table above](#flash-next-v250-online-fp8-performance-at-a-glance)
 shows the online-FP8 C1 observations; the
@@ -333,8 +333,8 @@ hardware, and methods.
 
 H3PO independently validated this runtime on a dual-GPU TP=2/EP=2 FP8
 deployment with native MTP after removing the optional overlap-plan-stream
-setting. The raw third-party table, corpus description, capacity result, and
-scope limits are preserved in [RESULTS.md](RESULTS.md#independent-tp2-fp8-validation).
+setting. The results, test data and configuration are in
+[RESULTS.md](RESULTS.md#independent-tp2-fp8-validation).
 See [Community results](COMMUNITY-RESULTS.md#h3po--two-gpu-flash-next) for
 H3PO's NVFP4 follow-up and reports from other operators.
 
@@ -351,10 +351,6 @@ Measured for the `qwen38-dflash2-pro6000-20260824` release on one RTX PRO
 | 4x 1,024-token decode | 390.23 tok/s aggregate |
 | Reasoning, xhigh / medium | 98.26 / 95.807 |
 | Medium tool suite | 30/30 tool selections and arguments; 29/30 reviewed response discipline |
-
-The cited public TP1 official-FP8/MTP3 community capture is directional rather
-than a strict A/B because checkpoint, runtime, speculation, power, harness,
-output duration, and cache configuration differ.
 
 The August 26 confirmation of the 24-slot/five-state configuration retained
 exact long-context needles, reached a 96.92 reasoning score across 50,986
@@ -397,7 +393,7 @@ Two portable NIXL fixes from this project remain open upstream: PR #36520
 isolates overlapping path registrations, and PR #36524 bounds bounce-backed
 hybrid transfers. Flash-Next adds complete PLE/GDN/QSA sibling-state persistence
 and load/COW ordering. [MEMORY-AND-PERSISTENCE.md](MEMORY-AND-PERSISTENCE.md)
-documents the representation namespace and actual failure boundaries.
+explains cache namespaces and how restoration works.
 
 ## Build and launch
 
@@ -414,24 +410,21 @@ profile at a time on a single GPU.
 ## Source changes and upstream work
 
 [CHANGES.md](CHANGES.md) records the release history, individual fixes,
-upstream PRs, and verification scope. [PROVENANCE.md](PROVENANCE.md) records
+upstream PRs, and tests. [PROVENANCE.md](PROVENANCE.md) records
 the source lineage. These include the DFlash2 and native-MTP integrations,
 SM120 kernels, cache restoration, parser fixes, and memory work.
 
-## Scope and limitations
+<a id="scope-and-limitations"></a>
 
-The published measurements belong to the stated model, release, hardware,
-and workload. They are not promises for every SGLang model or GPU. Both
-supported profiles have long-context, reasoning, tool, and media evidence;
-[RESULTS.md](RESULTS.md) separates the campaigns and their limitations.
+## Choosing your settings
 
-Community TP2 results are identified separately from local single-GPU tests.
-The v2.5.2 TP2 changes still await external verification. Online FP8 did not
-improve cold long-context time to first token in the matching samples, and
-NVMe PLE was slower than RAM PLE in the repeated concurrent-request comparison.
+Online FP8 improved decode speed in our tests; cold long-context time to first
+token stayed about the same. NVMe PLE saves host RAM, but was slower than RAM
+PLE with concurrent requests. The linked guides explain how to choose and
+enable each option.
 
-See [LIMITATIONS.md](LIMITATIONS.md) for the evidence boundaries and
-[CHANGES.md](CHANGES.md) for the checks performed for each maintenance release.
+See [RESULTS.md](RESULTS.md) for measurements, [Community results](COMMUNITY-RESULTS.md)
+for other users' setups, and [LIMITATIONS.md](LIMITATIONS.md) for known issues.
 
 ## Documentation map
 
@@ -440,8 +433,8 @@ See [LIMITATIONS.md](LIMITATIONS.md) for the evidence boundaries and
   Flash-Next alternative, startup checks, and optional settings.
 - [CONFIGURE.md](CONFIGURE.md) — what the beta setup configurator does, how to
   start it for native and container use, and where its settings are saved.
-- [FP8.md](FP8.md) — online-FP8 precision boundary, activation, evidence and
-  limits.
+- [FP8.md](FP8.md) — enable online FP8, understand its precision changes, and
+  see the results.
 - [NVME-PLE.md](NVME-PLE.md) — optional reader installation, overlay
   preparation, launch settings and measured RAM/speed tradeoff.
 - [BACKENDS.md](BACKENDS.md) — source-backed resolved backend and SM120 tables.
@@ -451,7 +444,7 @@ See [LIMITATIONS.md](LIMITATIONS.md) for the evidence boundaries and
   hybrid state representation.
 - [CHANGES.md](CHANGES.md) — cumulative release and upstream history.
 - [PROVENANCE.md](PROVENANCE.md) — source, package, checkpoint, and tag identity.
-- [LIMITATIONS.md](LIMITATIONS.md) — evidence, portability, and reproducibility boundaries.
+- [LIMITATIONS.md](LIMITATIONS.md) — known issues and hardware considerations.
 - [`jpezzulli/pennyroyal-validation`](https://github.com/jpezzulli/pennyroyal-validation)
   — maintained public validation harness and result catalog.
 

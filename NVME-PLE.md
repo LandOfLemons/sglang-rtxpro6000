@@ -5,16 +5,18 @@ prepared local NVMe snapshot, removing the table's fixed pinned-RAM residency.
 The feature is optional on the single-GPU NVIDIA RTX PRO 6000 Blackwell
 (SM120) recipe; RAM-backed PLE remains the default.
 
-The qualified table is 51,200,245,760 bytes (**47.68 GiB**) on SSD. NVMe mode
+The FP8 table is 51,200,245,760 bytes (**47.68 GiB**) on SSD. NVMe mode
 replaces its fixed pinned-RAM residency with bounded row buffers, row-ID
 staging and the reader's small native page pool. Filesystem page cache remains
 reclaimable RAM. Separate snapshots showed host `MemAvailable` about
 **54–56 GiB higher** with NVMe. Process state, filesystem cache, and other host
 activity also differed between snapshots.
 
-## Requirements and boundaries
+<a id="requirements-and-boundaries"></a>
 
-- Linux x86-64, Python 3.12 and the qualified TP=1 Flash-Next runtime.
+## Requirements
+
+- Linux x86-64, Python 3.12 and the TP=1 Flash-Next runtime.
 - Local SSD/NVMe storage for the prepared overlay. Do not place it on a media
   aggregation filesystem.
 - The original complete Flash-Next checkpoint must remain present and
@@ -26,8 +28,8 @@ activity also differed between snapshots.
 
 The public reference checkpoint is
 [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4).
-Other checkpoints need the same qualified Flash-Next architecture and PLE table
-format; the preparation and launcher identity checks are authoritative.
+Other checkpoints need the same Flash-Next architecture. The preparer and
+launcher check the model and table format before use.
 
 ## Install the optional reader
 

@@ -137,7 +137,7 @@ Run one profile at a time on a single GPU.
 
 ### Unknown tool names
 
-The qualified launchers default `SGLANG_FORWARD_UNKNOWN_TOOLS=true`. A native
+The launchers default `SGLANG_FORWARD_UNKNOWN_TOOLS=true`. A native
 tool call whose name is absent from the request's tool definitions reaches the
 API consumer's executor, which can return an error for the model to correct and
 retry. Markdown fenced tool examples remain text, and forwarding does not
@@ -189,7 +189,7 @@ One built-in JSON-schema warmup runs before readiness. It exercises a stable
 grammar/mask path; other schemas, long prefill, media, and concurrency shapes
 warm when used.
 
-This page covers the qualified native launchers. For the qualified container
+This page covers the native launchers. For the container
 path, use [`docker/pennyroyal`](docker/pennyroyal/README.md); other Docker files
 inherited from upstream serve their upstream purposes.
 
@@ -313,7 +313,7 @@ placement can be combined with online FP8.
 filesystem. Review them for your storage.
 
 The [map builder](scripts/pennyroyal/frspec/build_token_map.py) supports a
-different tokenizer or corpus. The bundled map defines the qualified FR-Spec
+different tokenizer or corpus. The bundled map defines the default FR-Spec
 profile; a new map gets its own validation and cache namespace. See
 [PROVENANCE.md](PROVENANCE.md#v23-fr-spec-provenance) for hashes and source
 details.
@@ -334,9 +334,9 @@ JPEG and static video checks, and three image-history turns around 208K
 context. Post-graph free memory was 5.21 GiB; the lowest media sample was
 1,187 MiB.
 
-The option changes KV capacity. Context remains 524,288 tokens, and no speed
-comparison was run. Model-GPU media preprocessing was not tested with this
-pool. Unset `MAX_TOTAL_TOKENS` to return to the 824,384-token FR-Spec default.
+The option changes KV capacity; context remains 524,288 tokens. Use CPU media
+preprocessing with this pool to leave more GPU memory for requests.
+Unset `MAX_TOTAL_TOKENS` to return to the 824,384-token FR-Spec default.
 The non-FR recipe uses automatic sizing when unset and accepts the same kind of
 page-aligned override. See
 [RESULTS.md](RESULTS.md#explicit-1000000-token-capacity-option) for timings.
@@ -474,7 +474,7 @@ Responses API precedence is unchanged.
 
 To change the launcher default itself (PR#18), export
 `PENNY_REASONING_EFFORT=none|minimal|low|medium|high|xhigh|max` before
-starting a recipe; unset or empty keeps the qualified medium. The recipes
+starting a recipe; unset or empty keeps the default medium. The recipes
 build `--default-chat-template-kwargs` from that single value, the server
 never reads the variable, and an invalid tier stops the launch.
 

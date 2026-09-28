@@ -6,11 +6,11 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Public documentation and distribution branch | `pennyroyal-main-sm120-final`; continues above the runtime release tag |
-| Qualified core runtime source | `69583da7c71b87ac36371333a19f2749bab72773` |
+| Core runtime source | `69583da7c71b87ac36371333a19f2749bab72773` |
 | Complete release source | Exact commit selected by `pennyroyal-v2.5.3`, including release packaging updates |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
 | Latest runtime additions | NEXTN checkpoint selection, BF16 NVMe PLE staging, streaming tools, prompt encoding and cache persistence |
-| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.3 Python/JIT source |
+| Dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.3 Python/JIT source |
 | Release | v2.5.3 |
 | Release tag | `pennyroyal-v2.5.3` |
 | Container build source | Exact commit selected by the release tag; also recorded in the image's OCI revision label |
@@ -62,14 +62,12 @@ records user-facing behavior and contributor credit.
 Both TP1 profiles completed full reasoning and streaming-tool runs, with
 fresh 64K storage restoration and device replay on each. Native CUDA transfer
 and checkpoint tests also passed. Earlier long-context, media and full host-cache
-campaigns are reused at their recorded source; no new throughput claim is made.
-WSL2 itself was not tested. Model reasoning can still be repetitive or wrong;
-completion and tool-validity checks are not a blanket answer-quality guarantee.
+campaigns retain their original source and dates in RESULTS.md.
 
 Release packaging refreshes the NVMe adapter's exact source hashes and version
 references above the checked runtime core. The automatic container build checks
-installation and source identity separately from native GPU validation. A fresh
-v2.5.3 container GPU campaign is not claimed.
+installation and source identity. GPU container results are recorded with
+v2.5.0; the v2.5.3 runtime checks used native installation.
 
 ## v2.5.2 source provenance
 

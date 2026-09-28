@@ -187,7 +187,9 @@ docker compose down
 `down` allows up to two minutes for shutdown, then removes the container and
 network. The three bind-mounted host directories remain intact.
 
-## Image checks and command boundary
+<a id="image-checks-and-command-boundary"></a>
+
+## Check the image and run commands
 
 The entrypoint exposes two non-serving checks. The CPU-only import check skips
 device work:
@@ -197,15 +199,15 @@ docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --help
 docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --check
 ```
 
-Arbitrary commands require the explicit `exec` boundary:
+To run another command inside the image, use `exec`:
 
 ```bash
 docker compose run --rm pennyroyal exec .venv/bin/python --version
 ```
 
 Release image builds run the automated CPU installation check shown above.
-Both profiles were regression-tested natively on the release source. The fresh
-container GPU qualification remains the v2.5.0 result: both profiles passed API
+Both profiles were regression-tested natively on the release source. In the
+v2.5.0 container tests, both profiles passed API
 schema/tool checks, 64K prefill, 1,024-token C1/C4 decode, JPEG and static-video
 checks, and NIXL reuse after container restart. Each restored 63,872 of 63,906
 prompt tokens from storage and returned exact `READY`. That GPU serving test
@@ -226,14 +228,14 @@ Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
 `SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default.
 
 `PENNY_REASONING_EFFORT` is a launcher-level convenience (PR#18): unset
-(default) keeps the recipes' qualified `medium` default chat-template
+(default) keeps the recipes' `medium` default chat-template
 kwargs, and `none|minimal|low|medium|high|xhigh|max` rewrites just that
 key before launch. It is launcher-only -- the server does not read it --
 and an explicit per-request `reasoning_effort` always wins over the
 default. An invalid value stops the container at launch.
 
 `TP_SIZE=2` asks the Next recipes for two tensor-parallel ranks (the
-qualified default is `TP_SIZE=1`), but `TP_SIZE` does not grant GPU access:
+default is `TP_SIZE=1`), but `TP_SIZE` does not grant GPU access:
 this compose.yaml reserves exactly one GPU under
 `deploy.resources.reservations.devices`, and Compose users who want TP2 must
 also edit that existing reservation to name two explicit ids — the complete
@@ -350,10 +352,7 @@ branch pushes do not publish a release image. No moving `latest` tag is used.
 
 The build checks package versions, the source revision and import location,
 launcher syntax, the entrypoint and the NIXL POSIX plugin without a GPU. A
-failed check fails the workflow and leaves the version tag unchanged. GPU
-regression remains separate: routine source-only maintenance uses the tested
-native runtime evidence, while changes to the container's dependency stack or
-device handling warrant another GPU container check.
+failed check fails the workflow and leaves the version tag unchanged.
 
 For a failed build, rerun the **Pennyroyal container** workflow in Actions.
 Alternatively, run it manually against the release's Git tag with both inputs

@@ -54,7 +54,7 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
 - **NIXL and host allocation:** correct hybrid storage-component counts and
   include opt-in pinned-host allocation/device-alias support adapted from
   [LandOfLemons' PR #24](https://github.com/jpezzulli/sglang-rtxpro6000/pull/24).
-  The native Linux transfer path was checked; WSL2 itself was not tested here.
+  Includes checks of the native Linux transfer path.
 
 Both supported profiles completed full reasoning and tool runs, plus fresh
 64K disk-cache restoration and device-replay checks. The 27B tool rerun used

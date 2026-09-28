@@ -78,7 +78,7 @@ a checkpoint at `/srv/models/RadixArk-Qwen3.8-Flash-Next-NVFP4` is entered as
 - **Advanced settings**: offered at the end, and skipped by saying no. It
   covers capacity overrides, online FP8, and where the PLE table lives.
   [RUN.md](RUN.md), [FP8.md](FP8.md), and [NVME-PLE.md](NVME-PLE.md) explain
-  those; skipping them keeps the qualified defaults.
+  those; skipping them keeps the defaults.
 
 You then see every value in one review, with a `*` beside the ones you
 changed, and a final confirmation before anything is written. Typing `q` at
