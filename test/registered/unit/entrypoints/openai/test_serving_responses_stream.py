@@ -1,5 +1,6 @@
+import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from utils import (
     StreamFixture,
@@ -10,7 +11,11 @@ from utils import (
     make_serving,
 )
 
-from sglang.srt.entrypoints.openai.protocol import ResponsesRequest
+from sglang.srt.entrypoints.openai.protocol import (
+    RequestResponseMetadata,
+    ResponsesRequest,
+    ResponsesResponse,
+)
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -24,7 +29,7 @@ class NonHarmonyStreamTestCase(CustomTestCase):
             ({"type": "length"}, "incomplete", ""),
             (
                 {"type": "abort", "status_code": 503, "message": "Worker unavailable"},
-                "completed",
+                "failed",
                 "",
             ),
         ):
@@ -44,6 +49,7 @@ class NonHarmonyStreamTestCase(CustomTestCase):
                 )
                 payloads = event_payloads(events)
                 self.assertEqual(payloads[-1]["response"]["status"], status)
+                self.assertEqual(payloads[-1]["type"], f"response.{status}")
                 output = payloads[-1]["response"]["output"]
                 reasoning = output[0]
                 self.assertEqual(reasoning["type"], "reasoning")
@@ -411,6 +417,147 @@ class MultiToolCallStreamingOrderTestCase(CustomTestCase):
         self.assertEqual(len(items), 2)
         self.assertTrue(all(i["name"] for i in items))
         self.assertEqual(items[0]["arguments"], '{"city": "Beijing"}')
+
+
+TERMINAL_CASES = (
+    ({"type": "stop"}, "completed", None),
+    ({"type": "length"}, "incomplete", None),
+    (
+        {"type": "abort", "status_code": 503, "message": "Worker unavailable"},
+        "failed",
+        "Worker unavailable",
+    ),
+    (
+        {"type": "abort", "status_code": 400, "message": "Bad request"},
+        "failed",
+        "Bad request",
+    ),
+)
+
+
+class TerminalStreamStatusTestCase(CustomTestCase):
+    """The last SSE event and ``response.status`` must agree: clients read the
+    event name as the outcome, so a length cap or an engine abort wrapped in
+    ``response.completed``/``completed`` reads as a finished answer."""
+
+    def _stream(self, serving, request, finish_reason, text="partial answer"):
+        chunk = engine_chunk(text, 3, finish=True)
+        chunk["meta_info"]["finish_reason"] = finish_reason
+        return StreamFixture(serving, request).run([chunk])
+
+    def test_terminal_event_matches_status_for_stop_length_and_abort(self):
+        serving = make_serving()
+        serving.reasoning_parser = None
+        serving.tool_call_parser = None
+
+        for finish_reason, status, message in TERMINAL_CASES:
+            with self.subTest(status=status):
+                request = ResponsesRequest(
+                    model="x", input="hi", stream=True, store=True
+                )
+                events = self._stream(serving, request, finish_reason)
+                types = event_types(events)
+                payloads = event_payloads(events)
+
+                terminal_names = (
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                )
+                self.assertEqual(types[-1], f"response.{status}")
+                self.assertEqual(sum(t in terminal_names for t in types), 1)
+                terminal = payloads[-1]["response"]
+                self.assertEqual(terminal["status"], status)
+
+                # partial output, usage and ids survive the non-completed outcome
+                self.assertEqual([i["type"] for i in terminal["output"]], ["message"])
+                self.assertEqual(
+                    terminal["output"][0]["content"][0]["text"], "partial answer"
+                )
+                done_item = next(
+                    p["item"]
+                    for p in payloads
+                    if p["type"] == "response.output_item.done"
+                )
+                self.assertEqual(done_item["id"], terminal["output"][0]["id"])
+                self.assertEqual(terminal["usage"]["output_tokens"], 3)
+                self.assertEqual(terminal["usage"]["input_tokens"], 5)
+
+                if status == "incomplete":
+                    self.assertEqual(
+                        terminal["incomplete_details"], {"reason": "max_output_tokens"}
+                    )
+                if status == "failed":
+                    self.assertEqual(
+                        terminal["error"],
+                        {"code": "server_error", "message": message},
+                    )
+
+                # sequence numbering stays contiguous across the new event
+                self.assertEqual(
+                    [p["sequence_number"] for p in payloads],
+                    list(range(len(payloads))),
+                )
+                # and the stored response reports the same outcome
+                stored = serving.response_store[request.request_id]
+                self.assertEqual(stored.status, status)
+                self.assertEqual(stored.id, request.request_id)
+
+    def test_cancelled_stored_response_is_not_overwritten(self):
+        serving = make_serving()
+        serving.reasoning_parser = None
+        serving.tool_call_parser = None
+        request = ResponsesRequest(model="x", input="hi", stream=True, store=True)
+        cancelled = ResponsesResponse.from_request(
+            request,
+            sampling_params={},
+            model_name="x",
+            created_time=0,
+            output=[],
+            status="cancelled",
+            usage=None,
+        )
+        serving.response_store[request.request_id] = cancelled
+
+        events = self._stream(
+            serving, request, {"type": "abort", "status_code": 503, "message": "boom"}
+        )
+
+        self.assertEqual(event_types(events)[-1], "response.failed")
+        self.assertEqual(event_payloads(events)[-1]["response"]["status"], "failed")
+        self.assertIs(serving.response_store[request.request_id], cancelled)
+
+    def test_unhandled_stream_error_keeps_failed_terminal_event(self):
+        serving = make_serving()
+        serving.reasoning_parser = None
+        serving.tool_call_parser = None
+        request = ResponsesRequest(model="x", input="hi", stream=True, store=False)
+
+        async def boom_generator():
+            yield engine_chunk("so far", 1)
+            raise RuntimeError("parser exploded")
+
+        async def collect():
+            out = []
+            async for chunk in serving.responses_stream_generator_non_harmony(
+                request,
+                sampling_params={},
+                result_generator=boom_generator(),
+                model_name="x",
+                tokenizer=Mock(),
+                request_metadata=RequestResponseMetadata(request_id=request.request_id),
+                require_reasoning=False,
+            ):
+                out.append(chunk)
+            return out
+
+        events = asyncio.run(collect())
+        payloads = event_payloads(events)
+        self.assertEqual(payloads[-1]["type"], "response.failed")
+        self.assertEqual(payloads[-1]["response"]["status"], "failed")
+        self.assertEqual(
+            payloads[-1]["response"]["error"]["message"], "parser exploded"
+        )
 
 
 if __name__ == "__main__":
