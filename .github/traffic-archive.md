@@ -166,35 +166,46 @@ when the service is available. A thegrid outage is caught up after user-manager
 startup; data absent from GitHub's retention window cannot be reconstructed.
 
 The report uses the existing host `mail` → `msmtp` sender. It keeps no local
-report state or report history; it reads GitHub at send time. Its report includes
-adoption/package observations with their own recorded dates, cumulative launch
-totals, daily and returned-window traffic, referrers and popular paths. Daily
-unique sums are labeled honestly and never presented as a deduplicated
-lifetime-person count.
+report state or report history and never calls the live `traffic/*` endpoints:
+it is a read-only view of one pinned `traffic-history` commit, reading the
+current canonical `daily.json`, `package-downloads.json`, and
+`repository-metrics.json` plus the one traffic snapshot whose `collected_at`
+equals `daily.json`'s, which supplies the rolling totals, referrers, and popular
+paths. The snapshot's dated rows must agree with the canonical archive for
+every date at or after launch (legitimate prelaunch exposure stays out of
+lifetime totals), and the email names the actual first/last dates of the
+returned rolling window rather than assuming fourteen days, so a regressed
+window is never misdated. Two reads of the same commit render identically.
+Daily unique sums are
+labeled honestly and never presented as a deduplicated lifetime-person count;
+clones and container downloads are never presented as distinct users.
 
-Report freshness is judged from the daily dates in the **current** traffic API
-response, never from the archive `collected_at` timestamp. A report is fresh when the
-newest returned day is yesterday UTC; when the newest day is today UTC it is labeled a
-partial bucket, and the newest completed day is never called "complete" because GitHub
-can still revise recent values. When the current response stops before yesterday UTC, the
-email is still sent, but the subject is prefixed `WARNING stale traffic, newest returned
-day <date> (recorded through <date>)` and the body leads with a WARNING naming the newest
-returned day, the exact days absent from that response through yesterday, and which of
-those the archive already records versus which remain unrecorded. The current response
-date and the merged `recorded through` date are labeled separately, so a regressed live
-window never claims archived dates are missing. Cumulative traffic lines carry no
-`(+N on <date>)` delta, because repeating the newest day's counts reads as growth when
-nothing new was exposed; daily activity lines carry the counts, and the cumulative
-section says it is recorded through that date rather than implying today's traffic.
-Adoption and package lines keep their own observation dates and deltas. Rolling totals
-are labeled as the window GitHub returned, and one line under referrers and one under
-paths state that those deltas compare the previous archived rolling-window snapshot,
-not daily activity, that the response itself carries no source timestamp, and that
-while daily traffic is stale a `+0` delta does not prove there was no new traffic;
-`new to returned top list` never means a new site. Collection failures (a capture
-before the 00:17 UTC cutoff, malformed or incomplete archives, future-dated days) still
-fail loudly and skip the email. `--dry-run` prints the subject and the body and sends
-nothing.
+Change figures are true net differences against the last archive commit before
+the current collection's UTC day, located with the commits API pinned to the
+same head (`commits?sha=<head>&until=<one second before that day>&per_page=1`);
+that commit's canonical histories are read without the current-capture freshness
+requirement but with the same identity, coverage, and contiguity validation as
+the current archive, including an identical launch date and no baseline dates
+missing from the current archive, so lost history fails loudly instead of
+inventing growth or negative corrections. Cumulative views, clones, and summed daily unique cloners are
+current archive sums minus baseline sums, so delayed GitHub corrections to
+older dates and newly exposed backfilled dates are included; stars, forks, and
+container downloads compare that baseline's latest canonical records. All
+deltas are labeled once as `Changes since the <date> collection`, using the
+baseline's actual collection date and never claiming a previous email. With no
+earlier commit the report says `Baseline unavailable` and shows no change
+figures instead of guessing `+0`. The body leads with the last recorded traffic
+day, the exact completed UTC dates still pending from GitHub (kept unknown,
+never zero-filled, never treated as an outage because age alone cannot tell a
+delayed API from a slow day), and either `New traffic dates: <range>`, `No newer
+traffic date since <baseline collection>`, or `Baseline unavailable`;
+same-date GitHub corrections are reported as revised recorded counts, not as a
+new date. Today's bucket is labeled partial. The subject is the stable
+`Pennyroyal GitHub report — <local date>` with no stale WARNING prefix.
+Collection failures (a capture before the 00:17 UTC cutoff, malformed or
+incomplete archives, a missing or mismatched current snapshot, future-dated
+days) still fail loudly and skip the email. `--dry-run` prints the subject and
+the body and sends nothing.
 
 Installed locations:
 

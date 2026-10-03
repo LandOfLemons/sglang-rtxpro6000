@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Email one daily Pennyroyal traffic report from verified GitHub archive data."""
+"""Email one daily Pennyroyal traffic report as a read-only view of one pinned traffic-history commit."""
 import argparse
 import base64
-import copy
 import datetime as dt
 import json
 import subprocess
@@ -10,7 +9,7 @@ import sys
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from traffic_watchdog import GitHub, UTC, now, required_cutoff, timestamp
+from traffic_watchdog import GitHub, now, required_cutoff, timestamp
 
 
 def require(condition, message):
@@ -26,44 +25,6 @@ def dates(first, last):
         current += dt.timedelta(days=1)
 
 
-def read_archive(github, branch):
-    head = github.api('git/ref/heads/' + quote(branch, safe=''))['object']['sha']
-    tree = github.api('git/trees/' + head)
-    require(not tree.get('truncated'), 'Truncated traffic-history root tree')
-    entries = {entry['path']: entry for entry in tree['tree'] if entry['type'] == 'blob'}
-    required = ('daily.json', 'package-downloads.json', 'repository-metrics.json')
-    require(all(path in entries for path in required), 'Required traffic-history file missing')
-    data = {}
-    for path in required:
-        blob = github.api('git/blobs/' + entries[path]['sha'])
-        require(blob.get('encoding') == 'base64' and blob.get('content'),
-                f'Malformed traffic-history blob: {path}')
-        try:
-            data[path] = json.loads(base64.b64decode(blob['content']))
-        except (ValueError, UnicodeError):
-            raise RuntimeError(f'Malformed traffic-history JSON: {path}') from None
-    traffic, package, metrics = (data['daily.json'], data['package-downloads.json'],
-                                 data['repository-metrics.json'])
-    for name, value in [('traffic', traffic), ('package', package), ('repository metrics', metrics)]:
-        require(value.get('repository') == github.repository and value.get('schema_version') == 1,
-                f'Invalid {name} archive identity/schema')
-        require(isinstance(value.get('days'), dict) and value['days'],
-                f'Empty {name} archive')
-    coverage = traffic.get('coverage')
-    require(isinstance(coverage, dict) and coverage.get('complete_through_latest_exposed') is True and
-            coverage.get('missing_dates_through_latest_exposed') == [],
-            'Traffic archive coverage is incomplete')
-    launch, through = traffic.get('launch_date'), coverage.get('through_date')
-    require(isinstance(launch, str) and isinstance(through, str) and
-            set(dates(launch, through)) == set(traffic['days']),
-            'Traffic archive dates are incomplete or inconsistent')
-    cutoff = required_cutoff(now())
-    for name, value in [('traffic', traffic), ('package', package), ('repository metrics', metrics)]:
-        require(timestamp(value.get('collected_at')) >= cutoff,
-                f'Stale {name} archive; refusing to email a success report')
-    return head, traffic, package, metrics
-
-
 def counts(value, label):
     require(isinstance(value, dict), f'Invalid {label}')
     result = {}
@@ -75,63 +36,24 @@ def counts(value, label):
     return result
 
 
-def live_traffic(github):
-    result = {}
-    for kind in ('views', 'clones'):
-        raw = github.api(f'traffic/{kind}?per=day')
-        totals = counts(raw, f'rolling {kind}')
-        rows = raw.get(kind)
-        require(isinstance(rows, list) and rows, f'Empty rolling {kind} series')
-        series = {}
-        for row in rows:
-            stamp = row.get('timestamp')
-            require(isinstance(stamp, str) and stamp.endswith('T00:00:00Z'),
-                    f'Invalid rolling {kind} timestamp')
-            day = stamp[:10]
-            dt.date.fromisoformat(day)
-            require(day not in series, f'Duplicate rolling {kind} date')
-            series[day] = counts(row, f'rolling {kind} row')
-        require(sum(row['count'] for row in series.values()) == totals['count'],
-                f'Inconsistent rolling {kind} total')
-        result[kind] = {'total': totals, 'days': series}
-    require(result['views']['days'].keys() == result['clones']['days'].keys(),
-            'Rolling views/clones windows differ')
-    return result
+def observed(row):
+    """Comparable daily counts only: last_collected_at churn is not a GitHub revision."""
+    require(isinstance(row, dict), 'Invalid daily record')
+    return {kind: counts(row.get(kind), f'daily {kind}') for kind in ('views', 'clones')}
 
 
-def current_days(traffic, rolling):
-    days = copy.deepcopy(traffic['days'])
-    for kind in ('views', 'clones'):
-        overlap = set(days) & set(rolling[kind]['days'])
-        if rolling[kind]['total']['count'] == 0:
-            require(not any(days[day][kind]['count'] > 0 for day in overlap),
-                    f'Suspicious empty rolling {kind} window would erase archived traffic')
-    for day in rolling['views']['days']:
-        days[day] = {
-            'views': rolling['views']['days'][day],
-            'clones': rolling['clones']['days'][day],
-        }
-    merged = dict(sorted(days.items()))
-    require(set(dates(traffic['launch_date'], max(merged))) == set(merged),
-            'Merged traffic dates are incomplete or inconsistent')
-    return merged
-
-
-def latest_metric(history, fields, label):
-    day = max(history['days'])
-    value = history['days'][day]
-    for field in fields:
-        require(type(value.get(field)) is int and value[field] >= 0,
-                f'Invalid {label} {field}')
-    return day, value
-
-
-def previous_metric(history, fields):
-    entries = sorted(history['days'].items())
-    if len(entries) < 2:
-        return {field: None for field in fields}
-    value = entries[-2][1]
-    return {field: value.get(field) for field in fields}
+def daily_totals(traffic, label, today=None):
+    totals = {'views': 0, 'clones': 0, 'daily_unique_visitors': 0, 'daily_unique_cloners': 0}
+    for day, row in traffic['days'].items():
+        require(dt.date.fromisoformat(day).isoformat() == day, f'Invalid {label} date {day}')
+        require(today is None or dt.date.fromisoformat(day) <= today,
+                f'Traffic data is dated in the future: {day}')
+        observed_row = observed(row)
+        totals['views'] += observed_row['views']['count']
+        totals['clones'] += observed_row['clones']['count']
+        totals['daily_unique_visitors'] += observed_row['views']['uniques']
+        totals['daily_unique_cloners'] += observed_row['clones']['uniques']
+    return totals
 
 
 def top_rows(rows, key, label):
@@ -144,60 +66,183 @@ def top_rows(rows, key, label):
     return result
 
 
-def previous_snapshot_counts(github, head):
+def decode_blob(github, sha, label):
+    blob = github.api('git/blobs/' + sha)
+    require(blob.get('encoding') == 'base64' and blob.get('content'),
+            f'Malformed traffic-history blob: {label}')
+    try:
+        return json.loads(base64.b64decode(blob['content']))
+    except (ValueError, UnicodeError):
+        raise RuntimeError(f'Malformed traffic-history JSON: {label}') from None
+
+
+def read_documents(github, tree_sha, required_paths):
+    # A commit SHA also resolves its root tree, so baseline and head read identically.
+    tree = github.api('git/trees/' + tree_sha)
+    require(not tree.get('truncated'), f'Truncated traffic-history tree: {tree_sha}')
+    entries = {entry['path']: entry for entry in tree['tree'] if entry['type'] == 'blob'}
+    documents = {}
+    for path, is_required in required_paths.items():
+        if path not in entries:
+            require(not is_required, f'Required traffic-history file missing: {path}')
+            documents[path] = None
+        else:
+            documents[path] = decode_blob(github, entries[path]['sha'], path)
+    return documents
+
+
+def validate_document(value, repository, label):
+    require(isinstance(value, dict), f'Invalid {label} document')
+    require(value.get('repository') == repository and value.get('schema_version') == 1,
+            f'Invalid {label} archive identity/schema')
+    require(isinstance(value.get('days'), dict) and value['days'], f'Empty {label} archive')
+    timestamp(value.get('collected_at'))
+
+
+def latest_record(document, fields, label, today=None):
+    if document is None:
+        return None, None
+    day = max(document['days'])
+    require(dt.date.fromisoformat(day).isoformat() == day, f'Invalid {label} date {day}')
+    require(dt.date.fromisoformat(day) <= dt.date.fromisoformat(document['collected_at'][:10]),
+            f'{label} record {day} is later than its own collection date')
+    require(today is None or dt.date.fromisoformat(day) <= today,
+            f'{label} record {day} is dated in the future')
+    row = document['days'][day]
+    require(isinstance(row, dict), f'Invalid {label} record')
+    for field in fields:
+        require(type(row.get(field)) is int and row[field] >= 0, f'Invalid {label} {field}')
+    stamp = row.get('collected_at')
+    if stamp is not None:
+        parsed = None
+        if isinstance(stamp, str):
+            try:
+                parsed = timestamp(stamp).date().isoformat()
+            except ValueError:
+                pass
+        require(parsed == day, f'Invalid {label} row collection timestamp')
+    return day, row
+
+
+def rolling(value, kind, label):
+    total = counts(value, label)
+    rows = value.get(kind)
+    require(isinstance(rows, list) and rows, f'Empty {label} series')
+    days, count = {}, 0
+    for row in rows:
+        stamp = row.get('timestamp')
+        require(isinstance(stamp, str) and stamp.endswith('T00:00:00Z'),
+                f'Invalid {label} timestamp')
+        day = stamp[:10]
+        dt.date.fromisoformat(day)
+        require(day not in days, f'Duplicate {label} date')
+        days[day] = counts(row, f'{label} row')
+        count += days[day]['count']
+    require(count == total['count'], f'Inconsistent {label} total')
+    require(max(row['uniques'] for row in days.values()) <= total['uniques'] <=
+            sum(row['uniques'] for row in days.values()), f'Inconsistent {label} uniques')
+    return total, days
+
+
+def read_snapshot(github, head, traffic, today):
+    """The one snapshot of the current collection: rolling totals, referrers, paths.
+
+    Every snapshot date at or after launch must agree with the canonical archive row;
+    legitimate prelaunch days GitHub exposes stay outside lifetime totals.
+    """
+    collected_at = traffic['collected_at']
     tree = github.api('git/trees/' + head + '?recursive=1')
     require(not tree.get('truncated'), 'Truncated traffic-history snapshot tree')
-    paths = sorted(entry['path'] for entry in tree['tree']
-                   if entry['type'] == 'blob' and entry['path'].startswith('snapshots/') and
-                   entry['path'].endswith('.json'))
-    if not paths:
+    prefix = f"snapshots/{collected_at[:10]}/{collected_at.replace(':', '')}-"
+    candidates = sorted((entry for entry in tree['tree'] if entry['type'] == 'blob'
+                         and entry['path'].startswith(prefix)), key=lambda entry: entry['path'])
+    require(candidates, f'No traffic snapshot matches collection {collected_at}')
+    snapshot = decode_blob(github, candidates[-1]['sha'], 'traffic snapshot')
+    require(isinstance(snapshot, dict) and snapshot.get('repository') == github.repository
+            and snapshot.get('schema_version') == 1, 'Invalid traffic snapshot identity/schema')
+    require(snapshot.get('collected_at') == collected_at,
+            'Traffic snapshot does not match the current collection')
+    responses = snapshot.get('traffic')
+    require(isinstance(responses, dict), 'Malformed traffic snapshot')
+    views, view_days = rolling(responses.get('views'), 'views', 'snapshot rolling views')
+    clones, clone_days = rolling(responses.get('clones'), 'clones', 'snapshot rolling clones')
+    require(view_days.keys() == clone_days.keys(), 'Snapshot rolling views/clones windows differ')
+    launch = dt.date.fromisoformat(traffic['launch_date'])
+    for kind, days in (('views', view_days), ('clones', clone_days)):
+        for day, row in days.items():
+            require(dt.date.fromisoformat(day) <= today, f'Snapshot data is dated in the future: {day}')
+            if dt.date.fromisoformat(day) < launch:
+                continue
+            require(day in traffic['days'] and
+                    {field: traffic['days'][day][kind][field] for field in ('count', 'uniques')} == row,
+                    f'Snapshot {kind} for {day} disagrees with the canonical archive')
+    return {'views': views, 'clones': clones, 'window': sorted(view_days),
+            'referrers': top_rows(responses.get('referrers'), 'referrer', 'referrer'),
+            'paths': top_rows(responses.get('paths'), 'path', 'path')}
+
+
+def read_current(github, branch):
+    head = github.api('git/ref/heads/' + quote(branch, safe=''))['object']['sha']
+    documents = read_documents(github, head, {path: True for path in (
+        'daily.json', 'package-downloads.json', 'repository-metrics.json')})
+    traffic = documents['daily.json']
+    package = documents['package-downloads.json']
+    metrics = documents['repository-metrics.json']
+    for name, value in [('traffic', traffic), ('package', package), ('repository metrics', metrics)]:
+        validate_document(value, github.repository, name)
+    coverage = traffic.get('coverage')
+    require(isinstance(coverage, dict) and coverage.get('complete_through_latest_exposed') is True and
+            coverage.get('missing_dates_through_latest_exposed') == [],
+            'Traffic archive coverage is incomplete')
+    launch, through = traffic.get('launch_date'), coverage.get('through_date')
+    require(isinstance(launch, str) and isinstance(through, str) and
+            set(dates(launch, through)) == set(traffic['days']),
+            'Traffic archive dates are incomplete or inconsistent')
+    today = now().date()
+    require(dt.date.fromisoformat(through) <= today, 'Traffic archive is dated in the future')
+    cutoff = required_cutoff(now())
+    for name, value in [('traffic', traffic), ('package', package), ('repository metrics', metrics)]:
+        require(timestamp(value['collected_at']) >= cutoff,
+                f'Stale {name} archive; refusing to email a success report')
+    return head, traffic, package, metrics, read_snapshot(github, head, traffic, today)
+
+
+def read_baseline(github, head, collected_at, launch, days):
+    """The last archive commit before the current collection's UTC day, read as full prior state."""
+    start = timestamp(collected_at).replace(hour=0, minute=0, second=0, microsecond=0)
+    until = (start - dt.timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    commits = github.api(f'commits?sha={head}&until={until}&per_page=1')
+    require(isinstance(commits, list) and all(isinstance(commit, dict) and
+            isinstance(commit.get('sha'), str) for commit in commits),
+            'Malformed traffic-history commit listing')
+    if not commits:
         return None
-    latest_day = paths[-1].split('/')[1]
-    previous = [path for path in paths if path.split('/')[1] < latest_day]
-    if not previous:
-        return None
-    entry = next(entry for entry in tree['tree'] if entry['path'] == previous[-1])
-    blob = github.api('git/blobs/' + entry['sha'])
-    require(blob.get('encoding') == 'base64' and blob.get('content'),
-            'Malformed previous traffic snapshot blob')
-    try:
-        snapshot = json.loads(base64.b64decode(blob['content']))
-    except (ValueError, UnicodeError):
-        raise RuntimeError('Malformed previous traffic snapshot JSON') from None
-    traffic = snapshot.get('traffic')
-    require(isinstance(traffic, dict), 'Malformed previous traffic snapshot')
-    result = {}
-    for kind, key in [('referrers', 'referrer'), ('paths', 'path')]:
-        rows = traffic.get(kind)
-        require(isinstance(rows, list), f'Malformed previous snapshot {kind} list')
-        values = {}
-        for row in rows:
-            require(isinstance(row.get(key), str) and row[key] and row[key] not in values,
-                    f'Malformed previous snapshot {kind}')
-            values[row[key]] = counts(row, f'previous snapshot {kind}')
-        result[kind] = values
-    return result
+    documents = read_documents(github, commits[0]['sha'], {
+        'daily.json': True, 'package-downloads.json': False, 'repository-metrics.json': False})
+    daily = documents['daily.json']
+    validate_document(daily, github.repository, 'baseline traffic')
+    require(timestamp(daily['collected_at']) < timestamp(collected_at),
+            'Baseline collection is not older than the current collection')
+    coverage = daily.get('coverage')
+    require(isinstance(coverage, dict) and coverage.get('complete_through_latest_exposed') is True and
+            coverage.get('missing_dates_through_latest_exposed') == [],
+            'Baseline traffic archive coverage is incomplete')
+    through = coverage.get('through_date')
+    require(daily.get('launch_date') == launch and isinstance(through, str) and
+            set(dates(launch, through)) == set(daily['days']),
+            'Baseline traffic archive dates are incomplete or inconsistent')
+    require(set(daily['days']) <= set(days),
+            'Current archive dropped dates retained by the baseline commit')
+    for name in ('package-downloads.json', 'repository-metrics.json'):
+        if documents[name] is not None:
+            validate_document(documents[name], github.repository, f'baseline {name}')
+    return {'collected_at': daily['collected_at'], 'daily': daily,
+            'package': documents['package-downloads.json'],
+            'metrics': documents['repository-metrics.json']}
 
 
 def delta(current, previous):
     return '—' if previous is None else f'{current - previous:+,}'
-
-
-def traffic_status(today, rolling, days):
-    """Judge live freshness from the returned API window, never the collection timestamp.
-
-    The current response and the merged archive are reported separately: an archive can
-    hold newer days than the API currently returns, and that is not a missing archive day.
-    """
-    live_day, recorded_through = max(rolling['views']['days']), max(days)
-    for day in (live_day, recorded_through):
-        require(dt.date.fromisoformat(day) <= today, f'Traffic data is dated in the future: {day}')
-    stale = dt.date.fromisoformat(live_day) < today - dt.timedelta(days=1)
-    missing = (list(dates(live_day, (today - dt.timedelta(days=1)).isoformat()))[1:]
-               if stale else [])
-    return {'live_day': live_day, 'recorded_through': recorded_through, 'stale': stale,
-            'missing': missing, 'unrecorded': [day for day in missing if day not in days],
-            'age_days': (today - dt.date.fromisoformat(recorded_through)).days}
 
 
 def span(days):
@@ -205,124 +250,96 @@ def span(days):
 
 
 def report(github, branch):
-    head, traffic, package, metrics = read_archive(github, branch)
-    rolling = live_traffic(github)
-    days = current_days(traffic, rolling)
+    head, traffic, package, metrics, snapshot = read_current(github, branch)
     today = now().date()
-    status = traffic_status(today, rolling, days)
-    latest_day = status['recorded_through']
-    latest = days[latest_day]
-    partial_today = latest_day == today.isoformat()
-    totals = {
-        'views': sum(row['views']['count'] for row in days.values()),
-        'clones': sum(row['clones']['count'] for row in days.values()),
-        'daily_unique_visitors': sum(row['views']['uniques'] for row in days.values()),
-        'daily_unique_cloners': sum(row['clones']['uniques'] for row in days.values()),
-    }
-    adoption_day, adoption = latest_metric(metrics, ('stars', 'forks'), 'adoption')
-    package_day, package_latest = latest_metric(package, ('total_downloads',), 'package')
-    referrers = top_rows(github.api('traffic/popular/referrers?per=day'), 'referrer', 'referrer')
-    paths = top_rows(github.api('traffic/popular/paths?per=day'), 'path', 'path')
-    snapshot_prior = previous_snapshot_counts(github, head)
+    through = traffic['coverage']['through_date']
+    totals = daily_totals(traffic, 'archive', today)
+    yesterday = (today - dt.timedelta(days=1)).isoformat()
+    pending = list(dates(through, yesterday))[1:] if through <= yesterday else []
+
+    baseline = read_baseline(github, head, traffic['collected_at'], traffic['launch_date'],
+                             traffic['days'])
+    baseline_day = baseline['collected_at'][:10] if baseline else None
+    baseline_totals = daily_totals(baseline['daily'], 'baseline archive') if baseline else None
+    new_dates, revised = [], False
+    if baseline:
+        new_dates = sorted(set(traffic['days']) - set(baseline['daily']['days']))
+        revised = any(observed(traffic['days'][day]) != observed(baseline['daily']['days'][day])
+                      for day in set(traffic['days']) & set(baseline['daily']['days']))
+    adoption_day, adoption = latest_record(metrics, ('stars', 'forks'), 'adoption', today)
+    package_day, package_latest = latest_record(package, ('total_downloads',), 'package', today)
+    _, baseline_adoption = latest_record(baseline['metrics'] if baseline else None,
+                                         ('stars', 'forks'), 'baseline adoption', today)
+    _, baseline_package = latest_record(baseline['package'] if baseline else None,
+                                        ('total_downloads',), 'baseline package', today)
+
     values = {
         'stars': adoption['stars'], 'forks': adoption['forks'],
         'views': totals['views'], 'clones': totals['clones'],
         'daily_unique_cloners': totals['daily_unique_cloners'],
         'package_downloads': package_latest['total_downloads'],
     }
-    prior = {
-        **previous_metric(metrics, ('stars', 'forks')),
-        'package_downloads': previous_metric(package, ('total_downloads',))['total_downloads'],
-    }
-    # Cumulative traffic carries no delta: the only "increase" available without a
-    # previous day of exposure is the latest day's own counts, which reads as growth
-    # even when GitHub returned nothing new. Daily activity below carries counts.
-    window = sorted(rolling['views']['days'])
-    lines = ['Pennyroyal daily GitHub report', '']
-    if status['stale']:
-        missing, unrecorded = status['missing'], status['unrecorded']
-        covered = [day for day in missing if day not in unrecorded]
-        if not covered:
-            gap = '; none of them is recorded in the archive.'
-        elif unrecorded:
-            gap = (f'; the archive records {span(covered)} UTC but not '
-                   f'{span(unrecorded)} UTC.')
-        else:
-            gap = f'; the archive already records {span(covered)} UTC.'
-        lines += [
-            f'WARNING: the current GitHub traffic response returned no day after '
-            f'{status["live_day"]} UTC,',
-            f'{len(missing)} day(s) are absent from the current API response '
-            f'({span(missing)} UTC)' + gap, '',
-        ]
-    lines += [
-        f'Data through: {latest_day} UTC'
-        + (" (today's bucket is partial; collection is still in progress)."
-           if partial_today else '.'),
-        f'Newest day in the current API response: {status["live_day"]} UTC.',
-        f'Archive commit: {head[:12]}.',
-        f'Rolling window GitHub returned: {window[0]} through {window[-1]} UTC.',
-        '  A returned window only proves what GitHub exposed; unexposed dates are not zero traffic.', '',
-        f'Adoption (stars/forks recorded {adoption_day} UTC)',
-        f'- Stars: {values["stars"]:,} ({delta(values["stars"], prior.get("stars"))})',
-        f'- Forks: {values["forks"]:,} ({delta(values["forks"], prior.get("forks"))})',
-        f'- Container downloads: {values["package_downloads"]:,} '
-        f'({delta(values["package_downloads"], prior.get("package_downloads"))}), '
-        f'recorded {package_day} UTC', '',
-        f'Traffic since launch (cumulative over all recorded days, '
-        f'recorded through {latest_day} UTC)',
-        f'- Views: {values["views"]:,}',
-        f'- Clones: {values["clones"]:,}',
-        f'- sum_of_daily_unique_cloners: {values["daily_unique_cloners"]:,}',
-        '  GitHub does not expose a deduplicated lifetime cloner count.'
-        + (' Traffic totals include only the recorded dates above; the current API '
-           'response is stale.' if status['stale'] else ''), '',
-        f'{latest_day} activity'
-        + (" (partial UTC day so far; GitHub can still revise it)" if partial_today else
-           f' (last recorded day, {status["age_days"]} day(s) old; historical)'
-           if status['age_days'] > 1 else
-           ' (latest completed UTC day; GitHub can still revise counts)'),
-        f'- Views: {latest["views"]["count"]:,} from {latest["views"]["uniques"]:,} daily unique visitors',
-        f'- Clones: {latest["clones"]["count"]:,} from {latest["clones"]["uniques"]:,} daily unique cloners', '',
-        'Rolling window returned by GitHub (window totals, not a freshness signal)',
-        f'- Views: {rolling["views"]["total"]["count"]:,}; unique visitors: {rolling["views"]["total"]["uniques"]:,}',
-        f'- Clones: {rolling["clones"]["total"]["count"]:,}; unique cloners: {rolling["clones"]["total"]["uniques"]:,}', '',
-        'Top referrers',
+    status = {'through_date': through, 'pending': pending, 'baseline_date': baseline_day,
+              'new_dates': new_dates, 'revised': revised, 'partial_today': through == today.isoformat()}
+
+    lines = [
+        f'Last recorded traffic day: {through} UTC.',
+        'Completed UTC days still pending from GitHub: ' + (', '.join(pending) or 'none') + '.',
     ]
-    def snapshot_delta(kind, name, count, uniques):
-        if snapshot_prior is None:
-            return '—'
-        prior_row = snapshot_prior[kind].get(name)
-        if prior_row is None:
-            return 'new to returned top list'
-        return (f'{delta(count, prior_row["count"])} views, '
-                f'{delta(uniques, prior_row["uniques"])} uniques')
-
-    def snapshot_note():
-        note = ('  Deltas compare the previous archived rolling-window snapshot, not daily '
-                'activity; the referrer/path response itself reports no source timestamp.')
-        if status['stale']:
-            note += (' While daily traffic is stale that snapshot may itself be old, so a +0 '
-                     'delta does not prove there was no new traffic.')
-        return note
-
-    lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors '
-              f'({snapshot_delta("referrers", name, count, uniques)})'
-              for name, count, uniques in referrers] or ['- None returned by GitHub']
-    lines += [snapshot_note(), '', 'Top paths']
-    lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors '
-              f'({snapshot_delta("paths", name, count, uniques)})'
-              for name, count, uniques in paths] or ['- None returned by GitHub']
-    lines += [snapshot_note(), '', f'https://github.com/{github.repository}/tree/{branch}']
+    if baseline is None:
+        lines.append('Baseline unavailable: no archive commit predates this collection, '
+                     'so change figures are not available.')
+    elif new_dates:
+        lines.append('New traffic dates: ' + span(new_dates) + '.' +
+                     (' Already-recorded dates were also revised by GitHub.' if revised else ''))
+    elif revised:
+        lines.append(f'No newer traffic date since the {baseline_day} collection; GitHub revised '
+                     'recorded counts for already-recorded dates.')
+    else:
+        lines.append(f'No newer traffic date since the {baseline_day} collection.')
+    lines.append('')
+    if baseline:
+        lines += [f'Changes since the {baseline_day} collection', '']
+    lines += [
+        'Adoption',
+        f'- Stars: {values["stars"]:,} ({delta(values["stars"], baseline_adoption["stars"] if baseline_adoption else None)}), '
+        f'recorded {adoption_day} UTC',
+        f'- Forks: {values["forks"]:,} ({delta(values["forks"], baseline_adoption["forks"] if baseline_adoption else None)}), '
+        f'recorded {adoption_day} UTC',
+        f'- Container downloads: {values["package_downloads"]:,} '
+        f'({delta(values["package_downloads"], baseline_package["total_downloads"] if baseline_package else None)}), '
+        f'recorded {package_day} UTC', '',
+        'Traffic since launch',
+        f'- Views: {values["views"]:,} '
+        f'({delta(values["views"], baseline_totals["views"] if baseline_totals else None)})',
+        f'- Clones: {values["clones"]:,} '
+        f'({delta(values["clones"], baseline_totals["clones"] if baseline_totals else None)})',
+        f'- Sum of daily unique cloners: {values["daily_unique_cloners"]:,} '
+        f'({delta(values["daily_unique_cloners"], baseline_totals["daily_unique_cloners"] if baseline_totals else None)})', '',
+        f'{through} activity' + (' (partial UTC day so far; GitHub can still revise it)' if status['partial_today']
+                                 else ' (last recorded completed UTC day)'),
+        f'- Views: {traffic["days"][through]["views"]["count"]:,} from '
+        f'{traffic["days"][through]["views"]["uniques"]:,} daily unique visitors',
+        f'- Clones: {traffic["days"][through]["clones"]["count"]:,} from '
+        f'{traffic["days"][through]["clones"]["uniques"]:,} daily unique cloners', '',
+        'Rolling window returned by this collection: ' + span(snapshot['window']),
+        f'- Views: {snapshot["views"]["count"]:,} total / {snapshot["views"]["uniques"]:,} unique visitors',
+        f'- Clones: {snapshot["clones"]["count"]:,} total / {snapshot["clones"]["uniques"]:,} unique cloners', '',
+        'Top referrers (same rolling window)',
+    ]
+    lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors'
+              for name, count, uniques in snapshot['referrers']] or ['- None returned']
+    lines += ['', 'Top paths (same rolling window)']
+    lines += [f'- {name}: {count:,} views / {uniques:,} unique visitors'
+              for name, count, uniques in snapshot['paths']] or ['- None returned']
+    lines += ['', 'Summed daily uniques re-count the same people across days; clones and '
+              'container downloads are not distinct users.', '',
+              f'https://github.com/{github.repository}/tree/{branch}']
     return '\n'.join(lines) + '\n', values, status
 
 
 def subject_line(local_date, status):
-    subject = f'Pennyroyal daily GitHub report — {local_date}'
-    if status['stale']:
-        subject = (f'WARNING stale traffic, newest returned day {status["live_day"]} '
-                   f'(recorded through {status["recorded_through"]}) — {subject}')
-    return subject
+    return f'Pennyroyal GitHub report — {local_date}'
 
 
 def main():
