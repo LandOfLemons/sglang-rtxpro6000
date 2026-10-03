@@ -22,8 +22,9 @@
 #   --startup PATH             startup script to run (default: config/start-flash-next-frspec.sh)
 #   --nixl-config PATH         NIXL config to use; omit to keep the one your
 #                              startup script names inside the config directory
-#   --no-nixl                  skip the /nixl mount: your startup script must not
-#                              select the NIXL storage backend (see config/start-flash-next-no-nixl.sh)
+#   --no-nixl                  skip the /nixl mount, for a startup script whose
+#                              NIXL setting is off (no root, config or backend).
+#                              The two choices are separate and must agree.
 #   --nvme-ple                 keep the io_uring-permitting seccomp setting for the
 #                              independent NVMe PLE reader while NIXL is off
 #   --image NAME               container image (default: the released v2.5.3 image)
@@ -61,6 +62,12 @@ NVME_PLE=off
 usage() {
   sed -n '/^# Prebuilt-image launcher/,/^set -euo/p' "${BASH_SOURCE[0]}" |
     sed -e '/^set -euo/d' -e 's/^# \{0,1\}//'
+}
+
+# A --volume value without a leading '/' is a named volume, not a host
+# directory, so every host path is resolved after it has been checked.
+host_path() {
+  (cd -- "$1" && pwd)
 }
 
 while (( $# )); do
@@ -105,11 +112,15 @@ command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
   echo "Cache root is missing or not writable: $HOST_CACHE_BASE" >&2
   exit 1
 }
+HOST_MODELS_ROOT="$(host_path "$HOST_MODELS_ROOT")"
+HOST_CACHE_BASE="$(host_path "$HOST_CACHE_BASE")"
 
 docker_args=(
   run --rm --init
   --user "$RUN_AS"
-  --gpus "device=$GPU"
+  # The device list needs literal double quotes: docker reads --gpus as CSV, so
+  # an unquoted device=0,1 arrives as device=0 plus the count 1.
+  --gpus "\"device=$GPU\""
   --publish "$PORT:8001"
   --shm-size 16g
   --ulimit memlock=-1:-1
@@ -127,6 +138,7 @@ if [[ "$NIXL" == on ]]; then
     echo "NIXL root is missing or not writable: $HOST_NIXL_STORAGE_BASE (use --no-nixl to skip it)" >&2
     exit 1
   }
+  HOST_NIXL_STORAGE_BASE="$(host_path "$HOST_NIXL_STORAGE_BASE")"
   docker_args+=(--volume "$HOST_NIXL_STORAGE_BASE:/nixl")
   if [[ -n "$NIXL_CONFIG" ]]; then
     [[ -f "$NIXL_CONFIG" && -r "$NIXL_CONFIG" ]] || {

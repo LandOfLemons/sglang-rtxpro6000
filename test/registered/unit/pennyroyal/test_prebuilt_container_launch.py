@@ -8,6 +8,7 @@ No GPU, no container runtime, no registry and no model: docker is a capturing
 stub and the server binary is a capturing script that records its argv.
 """
 
+import csv
 import json
 import os
 import subprocess
@@ -47,6 +48,8 @@ CONTROLLED = (
     "MAX_TOTAL_TOKENS",
     "SGLANG_MM_PREPROCESS_DEVICE",
     "SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR",
+    "CUDA_VISIBLE_DEVICES",
+    "FAKE_CUDA_DEVICES",
 )
 
 
@@ -106,10 +109,11 @@ def host_dirs(tmp_path: Path):
     return roots["models"], roots["cache"], roots["nixl"]
 
 
-def run_launcher(tmp_path: Path, *options: str):
+def run_launcher(tmp_path: Path, *options: str, cwd: Path | None = None):
     directory, capture = fake_docker(tmp_path)
     result = subprocess.run(
         ["bash", str(LAUNCH / "run.sh"), *options],
+        cwd=cwd,
         env=clean_env(
             PATH=f"{directory}:{os.environ['PATH']}",
             DOCKER_CAPTURE=str(capture),
@@ -166,7 +170,12 @@ def test_launcher_mounts_directories_and_runs_the_mounted_script(tmp_path):
         f"{nixl}:/nixl",
         f"{nixl_config.parent}:/nixl-config:ro",
     ]
-    assert argv_after(argv, "--gpus") == "device=0,1"
+    assert argv_after(argv, "--gpus") == '"device=0,1"'
+    # docker/cli (opts/gpus.go) reads the value with encoding/csv, so the
+    # literal inner quotes are part of the contract: unquoted device=0,1 is
+    # parsed as device=0 plus a count of 1, which selects the wrong devices.
+    assert next(csv.reader([argv_after(argv, "--gpus")])) == ["device=0,1"]
+    assert next(csv.reader(["device=0,1"])) == ["device=0", "1"]  # the wrong shape
     assert argv_after(argv, "--publish") == "8099:8001"
     assert argv_after(argv, "--user") == "1000:1000"
     assert argv_after(argv, "--shm-size") == "16g"
@@ -196,6 +205,43 @@ def test_launcher_default_startup_keeps_the_script_own_nixl_config(tmp_path):
     assert values_after(argv, "--volume")[3] == f"{nixl}:/nixl"
     # Nothing was named, so the selected script keeps the config it names.
     assert "-e" not in argv
+
+
+def test_launcher_resolves_relative_host_paths(tmp_path):
+    # A --volume value without a leading '/' names a volume, not a host
+    # directory, so relative operator paths must reach docker fully resolved --
+    # including when the path itself contains a space.
+    work = tmp_path / "operator dir"
+    (work / "models").mkdir(parents=True)
+    (work / "cache").mkdir(parents=True)
+    (work / "nixl root").mkdir(parents=True)
+    (work / "cfg dir" / "start up.sh").parent.mkdir()
+    (work / "cfg dir" / "start up.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (work / "cfg dir" / "nixl conf.toml").write_text("use_direct_io = true\n")
+
+    result, argv = run_launcher(
+        tmp_path,
+        "--startup",
+        "cfg dir/start up.sh",
+        "--nixl-config",
+        "cfg dir/nixl conf.toml",
+        "--models",
+        "models",
+        "--cache",
+        "cache",
+        "--nixl-root",
+        "nixl root",
+        cwd=work,
+    )
+    assert result.returncode == 0, result.stderr
+    assert values_after(argv, "--volume") == [
+        f"{work / 'cfg dir'}:/config:ro",
+        f"{work / 'models'}:/models:ro",
+        f"{work / 'cache'}:/cache",
+        f"{work / 'nixl root'}:/nixl",
+    ]
+    assert argv[-3:] == ["exec", "bash", "/config/start up.sh"]
+    assert values_after(argv, "-e") == ["NIXL_CONFIG=/config/nixl conf.toml"]
 
 
 def nixl_volumes(argv: list[str]) -> list[str]:
@@ -310,10 +356,31 @@ def image_root(tmp_path: Path) -> tuple[Path, Path, Path]:
     if (root / ".venv" / "bin" / "sglang").exists():
         return root, capture, env_capture
     (root / ".venv" / "bin").mkdir(parents=True)
-    # One line answers both launcher probes: the torch version and the visible
-    # CUDA device count (TP1 and TP2 both fit, and no GPU is touched).
+    # A probe-accurate stand-in: like torch, it reports device_count() through
+    # CUDA_VISIBLE_DEVICES, and only FAKE_CUDA_DEVICES says how many GPUs
+    # Docker granted the container. A launcher that narrows the visible list
+    # therefore really does hide a device from the TP guard.
     fake_python = root / ".venv" / "bin" / "python"
-    fake_python.write_text("#!/bin/sh\nprintf 2\n")
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'code="${*}"\n'
+        'if [[ "$code" != *device_count* ]]; then\n'
+        "  printf 2.9.0\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then\n'
+        '  IFS=, read -r -a requested <<< "$CUDA_VISIBLE_DEVICES"\n'
+        '  count="${#requested[@]}"\n'
+        "else\n"
+        '  count="${FAKE_CUDA_DEVICES:-1}"\n'
+        "fi\n"
+        'if [[ "$code" == *range* ]]; then\n'
+        '  printf "%s" "$(seq -s, 0 $((count - 1)))"\n'
+        "else\n"
+        '  printf "%s" "$count"\n'
+        "fi\n"
+    )
     fake_python.chmod(0o755)
     sglang = root / ".venv" / "bin" / "sglang"
     sglang.write_text(
@@ -324,6 +391,7 @@ def image_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         'for argument in "$@"; do printf "%s\\n" "$argument" >> "$SGLANG_CAPTURE"; done\n'
         'printf "namespace=%s\\n" "${SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
         'printf "cache=%s\\n" "${SGLANG_CACHE_DIR:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "cuda=%s\\n" "${CUDA_VISIBLE_DEVICES:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
     )
     sglang.chmod(0o755)
     (root / "configs").symlink_to(REPO / "configs")
@@ -340,10 +408,16 @@ def image_root(tmp_path: Path) -> tuple[Path, Path, Path]:
     return root, capture, env_capture
 
 
-def prepared_config(tmp_path: Path, *names: str, with_nixl_config: bool = True) -> Path:
-    """Copy the shipped examples into the operator's own directory and point
-    them at the checkpoints that exist here, which is exactly the edit an
-    operator makes before starting."""
+def prepared_config(
+    tmp_path: Path,
+    *names: str,
+    with_nixl_config: bool = True,
+    nixl: str = "on",
+    media: str | None = None,
+    tp: str | None = None,
+) -> Path:
+    """Copy the shipped examples into the operator's own directory and edit the
+    settings there, which is exactly what an operator does before starting."""
     directory = tmp_path / "launch config"
     directory.mkdir(exist_ok=True)
     if with_nixl_config:
@@ -360,9 +434,20 @@ def prepared_config(tmp_path: Path, *names: str, with_nixl_config: bool = True) 
             ),
             ('TARGET_MODEL="/models/Qwen3.8-27B-FP8"', f'TARGET_MODEL="{target}"'),
             ('DRAFT_MODEL="/models/Qwen3.8-27B-DFlash2"', f'DRAFT_MODEL="{draft}"'),
+            ("NIXL=on\n", f"NIXL={nixl}\n"),
         ):
+            if old in text or new == old:
+                assert old in text, (name, old)
             text = text.replace(old, new)
+        if media is not None:
+            old = "export SGLANG_MM_PREPROCESS_DEVICE=cpu\n"
+            assert old in text, name
+            text = text.replace(old, f"export SGLANG_MM_PREPROCESS_DEVICE={media}\n")
+        if tp is not None:
+            assert "TP_SIZE=1\n" in text, name
+            text = text.replace("TP_SIZE=1\n", f"TP_SIZE={tp}\n")
         assert f'TARGET_MODEL="{target}"' in text, name
+        assert f"NIXL={nixl}\n" in text, name
         (directory / name).write_text(text)
     return directory
 
@@ -406,7 +491,8 @@ def launch(
             TARGET_MODEL=str(target_checkpoint(tmp_path)),
             DRAFT_MODEL=str(draft_checkpoint(tmp_path)),
             **qualified_defaults(),
-            **(env or {}),
+            # Two GPUs granted by Docker unless the test says otherwise.
+            **{"FAKE_CUDA_DEVICES": "2", **(env or {})},
         ),
         text=True,
         capture_output=True,
@@ -419,19 +505,29 @@ def launch(
 
 
 def test_examples_are_editable_startup_files_with_container_paths(tmp_path):
+    assert (LAUNCH / "run.sh").is_file()
+    assert sorted(path.name for path in CONFIGS.glob("start-*.sh")) == [
+        "start-27b-dflash2.sh",
+        "start-flash-next-frspec.sh",
+        "start-flash-next.sh",
+    ]
     for name in (
         "start-flash-next.sh",
         "start-flash-next-frspec.sh",
-        "start-flash-next-no-nixl.sh",
         "start-27b-dflash2.sh",
     ):
         text = (CONFIGS / name).read_text()
         assert 'TARGET_MODEL="/models/' in text, name
         assert 'REPO_ROOT="${REPO_ROOT:-/opt/pennyroyal}"' in text, name
-        # Helpers, pinned template and pinned map stay inside the image.
+        # Helpers, the pinned template and the pinned map stay inside the image.
         assert 'source "$IMAGE_CONFIGS/chat-template.sh"' in text, name
-        assert 'TARGET_OVERRIDES=\'' in text, name
-    assert (LAUNCH / "run.sh").is_file()
+        assert "TARGET_OVERRIDES='" in text, name
+        # The disk tier is a setting inside the normal file, on by default, and
+        # it gates only the NIXL root, config, helper and backend arguments.
+        assert "NIXL=on\n" in text, name
+        assert "HICACHE_STORAGE_ARGS=()" in text, name
+        gate = '--hicache-mem-layout page_first "${HICACHE_STORAGE_ARGS[@]}"'
+        assert gate in text, name
     assert (CONFIGS / "nixl-posix.toml").is_file()
     assert (CONFIGS / "nixl-posix-frspec.toml").is_file()
 
@@ -473,8 +569,10 @@ def test_mounted_startup_reaches_the_server_unchanged(tmp_path):
         f"@{config / 'nixl-posix.toml'}"
     )
     assert argv_after(argv, "--model-path") == str(tmp_path / "model-share")
-    # The writable roots and the derived namespace are the launcher's own.
+    # The writable roots, the derived namespace and the GPU view Docker granted
+    # are the launcher's own; nothing here hides a granted device.
     assert str(root) in result.stdout  # the runtime really is the image's
+    assert server_env["cuda"] == "0,1"
     assert (cache / "sglang" / "jit").is_dir()
     namespace = Path(server_env["namespace"])
     assert namespace.is_dir() and str(namespace).startswith(str(nixl))
@@ -505,26 +603,82 @@ def test_mounted_startup_27b_keeps_its_profile(tmp_path):
     )
 
 
-def test_nixl_free_startup_keeps_ram_hicache_and_touches_nothing(tmp_path):
+def test_disk_tier_off_is_a_setting_inside_every_example(tmp_path):
     nixl = tmp_path / "nixl root"
     nixl.mkdir(parents=True, exist_ok=True)
-    (nixl / "keep-me" / "bucket").mkdir(parents=True)
-    (nixl / "keep-me" / "bucket" / "entry").write_bytes(b"cached")
-    config = prepared_config(tmp_path, "start-flash-next-no-nixl.sh")
-    result, argv, server_env, _ = launch(
-        tmp_path, config / "start-flash-next-no-nixl.sh", keep_nixl_root=True
+    (nixl / "old-namespace" / "bucket").mkdir(parents=True)
+    (nixl / "old-namespace" / "bucket" / "entry").write_bytes(b"cached")
+    for name in ("start-flash-next.sh", "start-27b-dflash2.sh"):
+        # No NIXL toml was supplied and only the image's own /nixl default
+        # exists, so this launch cannot touch the disk tier at all.
+        config = prepared_config(tmp_path, name, nixl="off", with_nixl_config=False)
+        result, argv, server_env, _ = launch(
+            tmp_path, config / name, keep_nixl_root=True
+        )
+        assert result.returncode == 0, (name, result.stderr)
+        for flag in (
+            "--hicache-storage-backend",
+            "--hicache-storage-prefetch-policy",
+            "--hicache-storage-backend-extra-config",
+        ):
+            assert flag not in argv, (name, flag)
+        # The GPU radix cache, the host-RAM tier and the profile stay intact.
+        assert "--enable-hierarchical-cache" in argv, name
+        assert argv_after(argv, "--hicache-io-backend") == "kernel", name
+        assert argv_after(argv, "--hicache-mem-layout") == "page_first", name
+        assert argv_after(argv, "--hicache-write-policy") == "write_through", name
+        assert argv_after(argv, "--hicache-size") in ("32", "96"), name
+        assert argv_after(argv, "--speculative-algorithm") in ("NEXTN", "DFLASH"), name
+        assert "--ple-offload-embedding" in argv or name != "start-flash-next.sh", name
+        assert server_env["namespace"] == "unset", name
+    # No NIXL work also means nothing created in, or deleted from, the root.
+    assert (nixl / "old-namespace" / "bucket" / "entry").read_bytes() == b"cached"
+    assert sorted(path.name for path in nixl.iterdir()) == ["old-namespace"]
+
+
+def test_disk_tier_off_in_the_frspec_example_needs_no_nixl_root(tmp_path):
+    config = prepared_config(
+        tmp_path,
+        "start-flash-next-frspec.sh",
+        nixl="off",
+        with_nixl_config=False,
+    )
+    result, argv, _, _ = launch(
+        tmp_path, config / "start-flash-next-frspec.sh", keep_nixl_root=True
+    )
+    # The launch reaches the pinned tokenizer instead of failing on a NIXL root
+    # or config, so the disk tier really is out of this path.
+    assert result.returncode != 0 and argv is None
+    assert "Mount a writable directory at /nixl" not in result.stderr
+    assert "NIXL config missing" not in result.stderr
+    assert "tokenizer differs from the qualified FR-Spec tokenizer" in result.stderr
+
+
+def test_container_startup_keeps_every_granted_gpu_visible(tmp_path):
+    # The exec entrypoint skips the built-in profile's device discovery, so the
+    # startup script must keep the whole Docker-granted set visible; narrowing
+    # it to 0..TP_SIZE-1 hides the optional cuda:N media processor.
+    plain = prepared_config(tmp_path, "start-flash-next.sh")
+    result, _, server_env, _ = launch(
+        tmp_path, plain / "start-flash-next.sh", env={"CUDA_VISIBLE_DEVICES": "1"}
     )
     assert result.returncode == 0, result.stderr
-    assert "--enable-hierarchical-cache" in argv
-    assert argv_after(argv, "--hicache-size") == "32"
-    assert argv_after(argv, "--hicache-io-backend") == "kernel"
-    assert argv_after(argv, "--hicache-mem-layout") == "page_first"
-    assert "--hicache-storage-backend" not in argv
-    assert not any("nixl" in argument.lower() for argument in argv)
-    assert server_env["namespace"] == "unset"
-    # No NIXL work means no NIXL root needed and no cache data removed.
-    assert (nixl / "keep-me" / "bucket" / "entry").read_bytes() == b"cached"
-    assert sorted(path.name for path in nixl.iterdir()) == ["keep-me"]
+    assert server_env["cuda"] == "1"  # an explicit selection still wins
+
+    dedicated = prepared_config(tmp_path, "start-flash-next.sh", media="cuda:1")
+    startup = dedicated / "start-flash-next.sh"
+    result, argv, server_env, _ = launch(tmp_path, startup)
+    assert result.returncode == 0, result.stderr
+    assert server_env["cuda"] == "0,1"
+    assert argv_after(argv, "--tp") == "1"
+    assert argv_after(argv, "--image-processor-backend") == "torchvision"
+
+    # The TP guard still refuses a device Docker never granted.
+    result, argv, _, _ = launch(
+        tmp_path, startup, env={"FAKE_CUDA_DEVICES": "1"}
+    )
+    assert result.returncode != 0 and argv is None
+    assert "needs at least 2 visible CUDA device(s)" in result.stderr
 
 
 def test_missing_nixl_config_is_not_replaced_by_an_image_default(tmp_path):

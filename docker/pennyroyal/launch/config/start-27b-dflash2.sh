@@ -28,6 +28,12 @@ DRAFT_MODEL="/models/Qwen3.8-27B-DFlash2"
 HICACHE_SIZE_GB=96
 # cpu keeps vision work off the model GPU; cuda:N needs that extra device.
 export SGLANG_MM_PREPROCESS_DEVICE=cpu
+# Disk tier: on (the qualified default) adds the NIXL FILE backend under
+# /nixl. off keeps the GPU radix cache and the host-RAM HiCache tier above and
+# drops only the disk tier: no NIXL root, config, namespace derivation or
+# storage-backend argument, and no data removal. run.sh decides separately
+# whether /nixl is mounted; the two choices have to agree.
+NIXL=on
 # ----------------------------------------------------------------------------
 
 export NUMPY_MADVISE_HUGEPAGE=0
@@ -45,9 +51,21 @@ SGLANG_EXE="${SGLANG_EXE:-$REPO_ROOT/.venv/bin/sglang}"
 PYTHON="${PYTHON:-$(dirname "$SGLANG_EXE")/python}"
 # /cache and /nixl are the container mount points run.sh publishes.
 CACHE_BASE="${CACHE_BASE:?Set CACHE_BASE to the durable compiler-cache root}"
-NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache root}"
-NIXL_CONFIG="${NIXL_CONFIG:-$CONFIG_DIR/nixl-posix.toml}"
-NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
+case "$NIXL" in
+  on|off) ;;
+  *) echo "NIXL must be on or off; got '$NIXL'" >&2; exit 1 ;;
+esac
+required_executables=("$SGLANG_EXE" "$PYTHON")
+writable_dirs=("$CACHE_BASE")
+# Disk tier off needs no NIXL root, no NIXL config and no namespace
+# helper: the settings block above stays the only source of truth.
+if [[ "$NIXL" == on ]]; then
+  NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache root}"
+  NIXL_CONFIG="${NIXL_CONFIG:-$CONFIG_DIR/nixl-posix.toml}"
+  NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
+  required_executables+=("$NAMESPACE_HELPER")
+  writable_dirs+=("$NIXL_STORAGE_BASE")
+fi
 
 source "$IMAGE_CONFIGS/chat-template.sh"
 source "$IMAGE_CONFIGS/reasoning-effort.sh"
@@ -69,10 +87,12 @@ if [[ ! "$HICACHE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-for path in "$SGLANG_EXE" "$PYTHON" "$NAMESPACE_HELPER"; do
+for path in "${required_executables[@]}"; do
   [[ -x "$path" ]] || { echo "Required executable missing: $path" >&2; exit 1; }
 done
-[[ -r "$NIXL_CONFIG" ]] || { echo "NIXL config missing: $NIXL_CONFIG" >&2; exit 1; }
+if [[ "$NIXL" == on ]]; then
+  [[ -r "$NIXL_CONFIG" ]] || { echo "NIXL config missing: $NIXL_CONFIG" >&2; exit 1; }
+fi
 [[ -f "$TARGET_MODEL/config.json" && -f "$TARGET_MODEL/model.safetensors.index.json" ]] || {
   echo "Incomplete target checkpoint: $TARGET_MODEL" >&2
   exit 1
@@ -83,16 +103,30 @@ done
 }
 # The image entrypoint checks these for its built-in profiles; the exec path
 # leaves the roots this script actually uses to the script itself.
-for directory in "$CACHE_BASE" "$NIXL_STORAGE_BASE"; do
+for directory in "${writable_dirs[@]}"; do
   if [[ ! -d "$directory" || ! -w "$directory" ]]; then
     echo "Mount a writable directory at $directory for container UID $(id -u)." >&2
     exit 1
   fi
 done
 mkdir -p "$CACHE_BASE"/{huggingface,torch,torchinductor,triton,cuda,flashinfer,sglang/jit}
-mkdir -p "$NIXL_STORAGE_BASE"
+if [[ "$NIXL" == on ]]; then
+  mkdir -p "$NIXL_STORAGE_BASE"
+fi
 
-export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# Docker/NVIDIA select the permitted host GPUs. The exec entrypoint hands the
+# launch to this script, so keep every granted device visible here instead of
+# narrowing to the model's own ranks: an optional cuda:N media processor needs
+# a device outside 0..TP_SIZE-1, and the TP guard below reads the same view.
+# An explicit CUDA_VISIBLE_DEVICES still wins.
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  CUDA_VISIBLE_DEVICES="$("$PYTHON" -c 'import torch; print(",".join(map(str, range(torch.cuda.device_count()))))')"
+  [[ -n "$CUDA_VISIBLE_DEVICES" ]] || {
+    echo 'No NVIDIA GPU is visible. Check the host Container Toolkit and GPU selection.' >&2
+    exit 1
+  }
+fi
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDACXX="${CUDACXX:-$CUDA_HOME/bin/nvcc}"
 export CC="${CC:-/usr/bin/gcc-15}" CXX="${CXX:-/usr/bin/g++-15}"
@@ -125,33 +159,46 @@ SGLANG_REV="$(git -C "$REPO_ROOT" rev-parse --short=10 HEAD)"
 TORCH_VERSION="$("$PYTHON" -c 'import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); print(torch.__version__)')"
 echo "Media preprocessing: $SGLANG_MM_PREPROCESS_DEVICE ($IMAGE_PROCESSOR_BACKEND); model GPU: cuda:0"
 printf 'Pennyroyal profile: Qwen3.8-27B FP8 + DFlash2\n  runtime: %s\n  target: %s\n  draft: %s\n  cache root: %s\n  NIXL root: %s\n' \
-  "$SGLANG_EXE" "$TARGET_MODEL" "$DRAFT_MODEL" "$CACHE_BASE" "$NIXL_STORAGE_BASE"
-echo "Deriving NIXL namespace; checkpoint identity hashing may take time..."
-NIXL_STORAGE="$("$NAMESPACE_HELPER" \
-  --base-root "$NIXL_STORAGE_BASE" \
-  --slug "qwen3_8_27b_524k_dflash2_${SGLANG_REV}" \
-  --git-repo "$REPO_ROOT" \
-  --model "target=$TARGET_MODEL" --model "draft=$DRAFT_MODEL" \
-  --field "chat_template_sha256=$CHAT_TEMPLATE_SHA" \
-  --field "image_processor_backend=$IMAGE_PROCESSOR_BACKEND" \
-  --field "mm_preprocess_device=$SGLANG_MM_PREPROCESS_DEVICE" \
-  --field "context_length=$CONTEXT_LENGTH" --field "tp_size=$TP_SIZE" \
-  --field "page_size=$PAGE_SIZE" --field "compute_dtype=$COMPUTE_DTYPE" \
-  --field "target_kv_dtype=$TARGET_KV_DTYPE" --field "draft_kv_dtype=$DRAFT_KV_DTYPE" \
-  --field "draft_quantization=unquant" --field "speculative_algorithm=DFLASH" \
-  --field "speculative_attention_mode=decode" --field "draft_tokens=$DRAFT_TOKENS" \
-  --field "draft_window_size=$DRAFT_WINDOW_SIZE" --field "hicache_io_backend=kernel" \
-  --field "hicache_mem_layout=page_first" --field "mamba_ssm_dtype=$MAMBA_SSM_DTYPE" \
-  --field "mamba_conv_dtype=$MAMBA_CONV_DTYPE" --field "max_mamba_cache_size=24" \
-  --field "mamba_max_states_per_path=5" --field "mamba_track_interval=$MAMBA_TRACK_INTERVAL" \
-  --field "mamba_radix_cache_strategy=extra_buffer_lazy" \
-  --field "prefill_attention_backend=flashinfer" \
-  --field "decode_attention_backend=trtllm_mha" --field "linear_attention_backend=triton" \
-  --field "chunked_prefill_size=2048" --field "max_prefill_tokens=2048" \
-  --field "target_model_overrides=$TARGET_OVERRIDES" --field "draft_model_overrides=$DRAFT_OVERRIDES" \
-  --field "torch_version=$TORCH_VERSION" --field "cuda_arch=12.0")"
-export SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR="$NIXL_STORAGE"
-echo "NIXL FILE namespace: $NIXL_STORAGE"
+  "$SGLANG_EXE" "$TARGET_MODEL" "$DRAFT_MODEL" "$CACHE_BASE" "${NIXL_STORAGE_BASE:-off}"
+if [[ "$NIXL" == on ]]; then
+  echo "Deriving NIXL namespace; checkpoint identity hashing may take time..."
+  NIXL_STORAGE="$("$NAMESPACE_HELPER" \
+    --base-root "$NIXL_STORAGE_BASE" \
+    --slug "qwen3_8_27b_524k_dflash2_${SGLANG_REV}" \
+    --git-repo "$REPO_ROOT" \
+    --model "target=$TARGET_MODEL" --model "draft=$DRAFT_MODEL" \
+    --field "chat_template_sha256=$CHAT_TEMPLATE_SHA" \
+    --field "image_processor_backend=$IMAGE_PROCESSOR_BACKEND" \
+    --field "mm_preprocess_device=$SGLANG_MM_PREPROCESS_DEVICE" \
+    --field "context_length=$CONTEXT_LENGTH" --field "tp_size=$TP_SIZE" \
+    --field "page_size=$PAGE_SIZE" --field "compute_dtype=$COMPUTE_DTYPE" \
+    --field "target_kv_dtype=$TARGET_KV_DTYPE" --field "draft_kv_dtype=$DRAFT_KV_DTYPE" \
+    --field "draft_quantization=unquant" --field "speculative_algorithm=DFLASH" \
+    --field "speculative_attention_mode=decode" --field "draft_tokens=$DRAFT_TOKENS" \
+    --field "draft_window_size=$DRAFT_WINDOW_SIZE" --field "hicache_io_backend=kernel" \
+    --field "hicache_mem_layout=page_first" --field "mamba_ssm_dtype=$MAMBA_SSM_DTYPE" \
+    --field "mamba_conv_dtype=$MAMBA_CONV_DTYPE" --field "max_mamba_cache_size=24" \
+    --field "mamba_max_states_per_path=5" --field "mamba_track_interval=$MAMBA_TRACK_INTERVAL" \
+    --field "mamba_radix_cache_strategy=extra_buffer_lazy" \
+    --field "prefill_attention_backend=flashinfer" \
+    --field "decode_attention_backend=trtllm_mha" --field "linear_attention_backend=triton" \
+    --field "chunked_prefill_size=2048" --field "max_prefill_tokens=2048" \
+    --field "target_model_overrides=$TARGET_OVERRIDES" --field "draft_model_overrides=$DRAFT_OVERRIDES" \
+    --field "torch_version=$TORCH_VERSION" --field "cuda_arch=12.0")"
+  export SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR="$NIXL_STORAGE"
+  echo "NIXL FILE namespace: $NIXL_STORAGE"
+else
+  echo "NIXL disk tier: off; GPU radix cache and host-RAM HiCache only"
+fi
+
+# With the disk tier off only these three storage-backend arguments
+# disappear; the GPU radix cache and the host-RAM tier above them stay.
+HICACHE_STORAGE_ARGS=()
+if [[ "$NIXL" == on ]]; then
+  HICACHE_STORAGE_ARGS=(--hicache-storage-backend nixl \
+    --hicache-storage-prefetch-policy timeout \
+    --hicache-storage-backend-extra-config "@$NIXL_CONFIG")
+fi
 
 launch_args=(serve \
   --warmups=structured_output \
@@ -173,9 +220,7 @@ launch_args=(serve \
   --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
   --enable-hierarchical-cache --hicache-size "$HICACHE_SIZE_GB" --hicache-host-memory-mode cache \
   --hicache-write-policy write_through --hicache-io-backend kernel \
-  --hicache-mem-layout page_first --hicache-storage-backend nixl \
-  --hicache-storage-prefetch-policy timeout \
-  --hicache-storage-backend-extra-config "@$NIXL_CONFIG" \
+  --hicache-mem-layout page_first "${HICACHE_STORAGE_ARGS[@]}" \
   --speculative-algorithm DFLASH --speculative-draft-model-path "$DRAFT_MODEL" \
   --speculative-draft-load-format safetensors \
   --speculative-draft-model-quantization unquant \
