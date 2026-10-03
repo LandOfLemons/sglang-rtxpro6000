@@ -4,6 +4,13 @@ torch guards a JIT build with a ``lock`` file and waits while it exists, so a
 process killed mid-build leaves every later loader spinning forever. The flock
 here is released by the kernel when its holder dies; under it, a leftover torch
 lock can only be stale and is removed before loading.
+
+The flock serializes *cooperating* loaders: every caller that goes through
+:func:`load_extension_with_recovery`. It is not a lock torch itself takes, so a
+loader that calls ``torch.utils.cpp_extension.load`` directly (an older tree, a
+vendored copy, a hand-run build) neither waits for us nor is waited for, and a
+lock file it leaves behind is deleted here as if stale. Releasing a live build
+that way costs that build's output, not correctness: the next loader rebuilds.
 """
 
 from __future__ import annotations
@@ -93,7 +100,12 @@ def _is_recoverable_load_error(
 
 @contextmanager
 def _extension_build_lock(build_directory: Path) -> Iterator[None]:
-    """Serialize builds and discard PyTorch lock files left by dead processes."""
+    """Serialize cooperating builds and drop PyTorch lock files from dead ones.
+
+    Only loaders that take this flock are excluded from each other, so the
+    absence of a flock owner does not prove a leftover torch ``lock`` is stale;
+    it only proves no cooperating loader is in front of us.
+    """
     build_directory.parent.mkdir(parents=True, exist_ok=True)
     lock_path = build_directory.parent / f".{build_directory.name}.sglang.lock"
     with lock_path.open("a+") as lock_file:
@@ -113,14 +125,33 @@ def _extension_build_lock(build_directory: Path) -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _forget_extension_version(name: str) -> None:
+    """Drop torch's in-memory version record for ``name``.
+
+    ``_jit_compile`` hashes sources and build flags and skips the build step when
+    the record is unchanged. The retry deletes the build directory first, so
+    without this the second call would import a shared library that no longer
+    exists instead of compiling one.
+    """
+    try:
+        from torch.utils.cpp_extension import JIT_EXTENSION_VERSIONER
+    except (ImportError, AttributeError):
+        return
+
+    entries = getattr(JIT_EXTENSION_VERSIONER, "entries", None)
+    if isinstance(entries, dict):
+        entries.pop(name, None)
+
+
 def load_extension_with_recovery(
     name: str,
     sources: Sequence[str],
     extra_cflags: Sequence[str] | None = None,
     extra_cuda_cflags: Sequence[str] | None = None,
+    verbose: bool = False,
+    *,
     extra_ldflags: Sequence[str] | None = None,
     with_cuda: bool | None = None,
-    verbose: bool = False,
 ) -> Any:
     from torch.utils.cpp_extension import load
 
@@ -155,6 +186,7 @@ def load_extension_with_recovery(
             if build_directory.exists():
                 shutil.rmtree(build_directory)
             build_directory.mkdir(parents=True)
+            _forget_extension_version(name)
             return load(**load_kwargs)
 
 
