@@ -2,15 +2,13 @@
 
 torch guards a JIT build with a ``lock`` file and waits while it exists, so a
 process killed mid-build leaves every later loader spinning forever. The flock
-here is released by the kernel when its holder dies; under it, a leftover torch
-lock can only be stale and is removed before loading.
+here is released by the kernel when its holder dies. If all writers of an
+extension's build directory use this helper, holding that flock means a leftover
+torch lock is stale and can be removed before loading.
 
-The flock serializes *cooperating* loaders: every caller that goes through
-:func:`load_extension_with_recovery`. It is not a lock torch itself takes, so a
-loader that calls ``torch.utils.cpp_extension.load`` directly (an older tree, a
-vendored copy, a hand-run build) neither waits for us nor is waited for, and a
-lock file it leaves behind is deleted here as if stale. Releasing a live build
-that way costs that build's output, not correctness: the next loader rebuilds.
+Direct torch loaders, including older checkouts, do not take this flock. Running
+them concurrently against the same extension directory can race with lock
+removal or rebuilding; this helper cannot protect those mixed-loader builds.
 """
 
 from __future__ import annotations
