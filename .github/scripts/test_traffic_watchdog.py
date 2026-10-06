@@ -1,5 +1,6 @@
 import datetime as dt
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -14,9 +15,10 @@ T = dt.datetime(2026, 9, 7, 2, 0, tzinfo=dt.timezone.utc)
 
 class FakeGitHub:
     def __init__(self, collected='2026-09-06T01:35:52+00:00', status='completed',
-                 conclusion='success', package_collected=None):
+                 conclusion='success', package_collected=None, hf_collected=None):
         self.collected = collected
         self.package_collected = package_collected or collected
+        self.hf_collected = hf_collected or collected
         self.status = status
         self.conclusion = conclusion
         self.dispatch_count = 0
@@ -24,11 +26,13 @@ class FakeGitHub:
         self.latest = []
         self.update = True
         self.update_package = True
+        self.update_hf = True
         self.dispatch_failure = False
 
     def archive(self, branch):
         return {'head': 'history', 'collected_at': self.collected,
                 'package_collected_at': self.package_collected,
+                'hf_collected_at': self.hf_collected,
                 'through_date': '2026-09-05'}
 
     def runs(self):
@@ -45,6 +49,8 @@ class FakeGitHub:
             self.collected = T.isoformat()
         if self.status == 'completed' and self.conclusion == 'success' and self.update_package:
             self.package_collected = T.isoformat()
+        if self.status == 'completed' and self.conclusion == 'success' and self.update_hf:
+            self.hf_collected = T.isoformat()
         return {'id': run_id, 'status': self.status, 'conclusion': self.conclusion,
                 'html_url': 'https://github.com/test/repo/actions/runs/' + str(run_id)}
 
@@ -150,6 +156,18 @@ class WatchdogTests(unittest.TestCase):
             w.reconcile(g, self.state, 'traffic-history')
         self.assertFalse((self.state / 'verified.json').exists())
 
+    def test_stale_hf_archive_dispatches_when_traffic_and_package_fresh(self):
+        self.verified()
+        g = FakeGitHub(T.isoformat(), hf_collected='2026-09-06T01:35:52+00:00')
+        w.reconcile(g, self.state, 'traffic-history')
+        self.assertEqual(g.dispatch_count, 1)
+
+    def test_success_without_hf_archive_update_is_failure(self):
+        g = FakeGitHub();g.update_hf = False
+        with self.assertRaises(RuntimeError):
+            w.reconcile(g, self.state, 'traffic-history')
+        self.assertFalse((self.state / 'verified.json').exists())
+
     def test_unknown_dispatch_persists_intent_and_adopts_registered_run(self):
         g = FakeGitHub();g.dispatch_failure = True
         with self.assertRaises(RuntimeError):
@@ -230,6 +248,188 @@ class WatchdogTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):w.reconcile(g, self.state, 'traffic-history')
         self.assertFalse((self.state / 'pending.json').exists())
         self.assertEqual(g.dispatch_count, 0)
+
+
+def _traffic_blob():
+    import base64
+    doc = {'repository': 'test/repo', 'schema_version': 1,
+           'collected_at': T.isoformat(),
+           'coverage': {'through_date': '2026-09-05'},
+           'days': {'2026-09-05': {'views': {'count': 1, 'uniques': 1},
+                                    'clones': {'count': 1, 'uniques': 1}}}}
+    return {'encoding': 'base64', 'content': base64.b64encode(json.dumps(doc).encode()).decode()}
+
+
+def _package_blob():
+    import base64
+    doc = {'repository': 'test/repo', 'schema_version': 1,
+           'collected_at': T.isoformat(),
+           'days': {'2026-09-05': {'total_downloads': 1}}}
+    return {'encoding': 'base64', 'content': base64.b64encode(json.dumps(doc).encode()).decode()}
+
+
+def _hf_blob(stamp=None, day=None):
+    import base64
+    moment = stamp or T.isoformat()
+    day = day or moment[:10]
+    doc = {'repository': 'test/repo', 'schema_version': 1,
+           'first_collected_at': moment, 'collected_at': moment,
+           'days': {day: {'downloads_all_time': 100, 'downloads_last_30_days': 90,
+                          'likes': 5, 'collected_at': moment}}}
+    return {'encoding': 'base64', 'content': base64.b64encode(json.dumps(doc).encode()).decode()}
+
+
+class RealArchivePathTests(unittest.TestCase):
+    """Exercise the actual GitHub.archive read path via a fake api (no subprocess)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name)
+
+    def gh(self, tree_entries, blobs):
+        g = w.GitHub('test/repo', 'archive-traffic.yml')
+        def api(path):
+            if path.startswith('git/ref/heads/'):
+                return {'object': {'sha': 'head'}}
+            if path == 'git/trees/head':
+                return {'truncated': False, 'tree': tree_entries}
+            if path.startswith('git/trees/'):
+                return {'truncated': False, 'tree': blobs.get(path, [])}
+            if path.startswith('git/blobs/'):
+                sha = path[len('git/blobs/'):]
+                if sha not in blobs:
+                    raise AssertionError(f'unexpected blob: {sha}')
+                return blobs[sha]
+            raise AssertionError(path)
+        g.api = api
+        return g
+
+    def test_uninitialized_hf_represents_as_needing_collection(self):
+        """HF genuinely absent (no artifacts) → epoch timestamp, no raise."""
+        entries = [
+            {'path': 'daily.json', 'type': 'blob', 'sha': 'daily'},
+            {'path': 'package-downloads.json', 'type': 'blob', 'sha': 'pkg'},
+        ]
+        blobs = {'daily': _traffic_blob(), 'pkg': _package_blob()}
+        result = self.gh(entries, blobs).archive('traffic-history')
+        self.assertEqual(result['hf_collected_at'], w._EPOCH)
+        # Epoch is always older than any cutoff, so the collector must dispatch
+        self.assertLess(w.timestamp(result['hf_collected_at']),
+                        w.required_cutoff(T))
+
+    def test_uninitialized_hf_dispatches_then_verifies_recovered_archive(self):
+        """Reconcile dispatches when HF is epoch; verifies only after HF becomes fresh."""
+        class HFPhaseGitHub(FakeGitHub):
+            def __init__(self):
+                super().__init__(T.isoformat())
+                self.archive_calls = 0
+
+            def archive(self, branch):
+                self.archive_calls += 1
+                if self.archive_calls == 1:
+                    # First read: HF uninitialized (epoch), others fresh
+                    return {'head': 'history', 'collected_at': T.isoformat(),
+                            'package_collected_at': T.isoformat(),
+                            'hf_collected_at': w._EPOCH,
+                            'through_date': '2026-09-05'}
+                # Post-dispatch read: HF recovered
+                return {'head': 'history', 'collected_at': T.isoformat(),
+                        'package_collected_at': T.isoformat(),
+                        'hf_collected_at': T.isoformat(),
+                        'through_date': '2026-09-05'}
+
+        clock = patch.object(w, 'now', return_value=T)
+        clock.start()
+        self.addCleanup(clock.stop)
+        g = HFPhaseGitHub()
+        w.reconcile(g, self.state, 'traffic-history', wait_seconds=0)
+        self.assertEqual(g.dispatch_count, 1)
+        self.assertEqual(g.archive_calls, 2)
+        self.assertTrue((self.state / 'verified.json').exists())
+
+    def test_recovered_hf_never_silently_verified_without_fresh_hf(self):
+        """Zero silent success: if HF stays epoch after run, verified.json is not written."""
+        class HFStuckGitHub(FakeGitHub):
+            def archive(self, branch):
+                return {'head': 'history', 'collected_at': T.isoformat(),
+                        'package_collected_at': T.isoformat(),
+                        'hf_collected_at': w._EPOCH,
+                        'through_date': '2026-09-05'}
+
+        clock = patch.object(w, 'now', return_value=T)
+        clock.start()
+        self.addCleanup(clock.stop)
+        w.write_json(self.state / 'verified.json', {'run_id': 1})
+        g = HFStuckGitHub()
+        with self.assertRaises(RuntimeError):
+            w.reconcile(g, self.state, 'traffic-history', wait_seconds=0)
+        # The stale-HF run must never be recorded as verified:
+        # verified.json keeps its previous run_id, never the new dispatch.
+        self.assertEqual(w.load_json(self.state / 'verified.json')['run_id'], 1)
+
+    def test_established_but_lost_hf_fails_loud(self):
+        """HF artifacts exist but canonical JSON gone: archive raises, never epoch."""
+        entries = [
+            {'path': 'daily.json', 'type': 'blob', 'sha': 'daily'},
+            {'path': 'package-downloads.json', 'type': 'blob', 'sha': 'pkg'},
+            {'path': 'HUGGINGFACE-DOWNLOADS.md', 'type': 'blob', 'sha': 'hf-md'},
+        ]
+        blobs = {'daily': _traffic_blob(), 'pkg': _package_blob()}
+        with self.assertRaises(RuntimeError):
+            self.gh(entries, blobs).archive('traffic-history')
+
+    def test_corrupt_hf_canonical_fails_loud(self):
+        """HF canonical present but invalid schema: archive raises."""
+        import base64
+        entries = [
+            {'path': 'daily.json', 'type': 'blob', 'sha': 'daily'},
+            {'path': 'package-downloads.json', 'type': 'blob', 'sha': 'pkg'},
+            {'path': 'huggingface-downloads.json', 'type': 'blob', 'sha': 'hf'},
+        ]
+        blobs = {'daily': _traffic_blob(), 'pkg': _package_blob(),
+                 'hf': {'encoding': 'base64',
+                        'content': base64.b64encode(b'{"repository": "wrong"}').decode()}}
+        with self.assertRaises(RuntimeError):
+            self.gh(entries, blobs).archive('traffic-history')
+
+    def test_fresh_hf_verified_normally(self):
+        """All three archives fresh: normal return."""
+        entries = [
+            {'path': 'daily.json', 'type': 'blob', 'sha': 'daily'},
+            {'path': 'package-downloads.json', 'type': 'blob', 'sha': 'pkg'},
+            {'path': 'huggingface-downloads.json', 'type': 'blob', 'sha': 'hf'},
+        ]
+        blobs = {'daily': _traffic_blob(), 'pkg': _package_blob(), 'hf': _hf_blob()}
+        result = self.gh(entries, blobs).archive('traffic-history')
+        self.assertEqual(result['hf_collected_at'], w.timestamp(T.isoformat()).isoformat())
+
+    def test_hf_future_row_cannot_be_marked_current(self):
+        """Observation dated beyond the archive's collected_at fails the read path."""
+        entries = [
+            {'path': 'daily.json', 'type': 'blob', 'sha': 'daily'},
+            {'path': 'package-downloads.json', 'type': 'blob', 'sha': 'pkg'},
+            {'path': 'huggingface-downloads.json', 'type': 'blob', 'sha': 'hf'},
+        ]
+        blobs = {'daily': _traffic_blob(), 'pkg': _package_blob(),
+                 'hf': _hf_blob(day='2099-01-01')}
+        with self.assertRaises(RuntimeError):
+            self.gh(entries, blobs).archive('traffic-history')
+
+    def test_hf_missing_first_collected_at_cannot_be_marked_current(self):
+        import base64
+        entries = [
+            {'path': 'daily.json', 'type': 'blob', 'sha': 'daily'},
+            {'path': 'package-downloads.json', 'type': 'blob', 'sha': 'pkg'},
+            {'path': 'huggingface-downloads.json', 'type': 'blob', 'sha': 'hf'},
+        ]
+        corrupt = json.loads(base64.b64decode(_hf_blob()['content']))
+        del corrupt['first_collected_at']
+        blobs = {'daily': _traffic_blob(), 'pkg': _package_blob(),
+                 'hf': {'encoding': 'base64',
+                        'content': base64.b64encode(json.dumps(corrupt).encode()).decode()}}
+        with self.assertRaises(RuntimeError):
+            self.gh(entries, blobs).archive('traffic-history')
 
 
 if __name__ == '__main__':

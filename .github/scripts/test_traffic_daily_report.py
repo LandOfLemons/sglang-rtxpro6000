@@ -81,6 +81,15 @@ def package_document(stamp, days):
     return {'repository': REPOSITORY, 'schema_version': 1, 'collected_at': stamp, 'days': days}
 
 
+def hf_document(stamp, days, model_id='jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4'):
+    return {'repository': REPOSITORY, 'schema_version': 1, 'collected_at': stamp,
+            'model_id': model_id, 'days': days}
+
+
+def hf_obs(all_time, rolling30, likes):
+    return {'downloads_all_time': all_time, 'downloads_last_30_days': rolling30, 'likes': likes}
+
+
 def snapshot_document(daily, window=None, stamp=None, extra_rows=()):
     """A coherent snapshot: its dated rows mirror the canonical rows collected with it."""
     days = daily['days']
@@ -124,15 +133,21 @@ def head_documents(days=None, through='2026-10-01', stamp=CURRENT_STAMP):
                 stamp, {'2026-10-02': {'total_downloads': 42}, '2026-10-03': {'total_downloads': 45}}),
             'repository-metrics.json': metrics_document(
                 stamp, {'2026-10-02': {'stars': 11, 'forks': 3},
-                        '2026-10-03': {'stars': 12, 'forks': 3}})}
+                        '2026-10-03': {'stars': 12, 'forks': 3}}),
+            'huggingface-downloads.json': hf_document(
+                stamp, {'2026-10-02': hf_obs(1044, 900, 8),
+                        '2026-10-03': hf_obs(1050, 920, 9)})}
 
 
-def base_documents(names=('daily.json', 'package-downloads.json', 'repository-metrics.json')):
+def base_documents(names=('daily.json', 'package-downloads.json', 'repository-metrics.json',
+                          'huggingface-downloads.json')):
     documents = {'daily.json': daily_document(BASELINE_STAMP, baseline_rows(), '2026-09-30'),
                  'package-downloads.json': package_document(
                      BASELINE_STAMP, {'2026-10-02': {'total_downloads': 42}}),
                  'repository-metrics.json': metrics_document(
-                     BASELINE_STAMP, {'2026-10-02': {'stars': 11, 'forks': 3}})}
+                     BASELINE_STAMP, {'2026-10-02': {'stars': 11, 'forks': 3}}),
+                 'huggingface-downloads.json': hf_document(
+                     BASELINE_STAMP, {'2026-10-02': hf_obs(1044, 900, 8)})}
     return {key: documents[key] for key in names}
 
 
@@ -176,7 +191,8 @@ class DailyReportTests(unittest.TestCase):
     def test_oct3_over_oct2_baseline_advances_with_pending_day(self):
         body, values, status = r.report(standard_github(), 'traffic-history')
         self.assertEqual(values, {'stars': 12, 'forks': 3, 'views': 9179, 'clones': 30238,
-                                  'daily_unique_cloners': 2141, 'package_downloads': 45})
+                                  'daily_unique_cloners': 2141, 'package_downloads': 45,
+                                  'hf_all_time': 1050, 'hf_rolling30': 920, 'hf_likes': 9})
         self.assertIn('Last recorded traffic day: 2026-10-01 UTC.', body)
         self.assertIn('Completed UTC days still pending from GitHub: 2026-10-02.', body)
         self.assertIn('New traffic dates: 2026-10-01.', body)
@@ -187,6 +203,11 @@ class DailyReportTests(unittest.TestCase):
         self.assertIn('- Stars: 12 (+1), recorded 2026-10-03 UTC', body)
         self.assertIn('- Forks: 3 (+0), recorded 2026-10-03 UTC', body)
         self.assertIn('- Container downloads: 45 (+3), recorded 2026-10-03 UTC', body)
+        self.assertIn('Hugging Face model', body)
+        self.assertIn('- Model: jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4', body)
+        self.assertIn('- All-time downloads: 1,050 (+6), observed 2026-10-03 UTC', body)
+        self.assertIn('- Rolling 30-day downloads: 920 (separate window, not cumulative)', body)
+        self.assertIn('- Likes: 9 (+1), observed 2026-10-03 UTC', body)
         self.assertIn('2026-10-01 activity (last recorded completed UTC day)', body)
         self.assertIn('- Views: 159 from 79 daily unique visitors', body)
         self.assertIn('- Clones: 962 from 82 daily unique cloners', body)
@@ -309,6 +330,8 @@ class DailyReportTests(unittest.TestCase):
         self.assertIn('- Views: 9,179 (+159)', body)
         self.assertIn('- Stars: 12 (—)', body)
         self.assertIn('- Container downloads: 45 (—)', body)
+        self.assertIn('- All-time downloads: 1,050 (—)', body)
+        self.assertIn('- Likes: 9 (—)', body)
 
     def test_pending_dates_are_exact_and_never_zero_filled(self):
         days = {day: row for day, row in baseline_rows().items() if day <= '2026-09-29'}
@@ -450,6 +473,24 @@ class DailyReportTests(unittest.TestCase):
                 github.blobs['base/package-downloads.json']['days']['2026-10-03'] = {
                     'total_downloads': 44}
                 return github
+            if name == 'missing_hf':
+                head = {key: value for key, value in head_documents().items() if key != 'huggingface-downloads.json'}
+                return standard_github(head=head,
+                                       snapshots={SNAPSHOT_PATH: snapshot_document(
+                                           head_documents()['daily.json'])})
+            if name == 'stale_hf':
+                github = standard_github()
+                github.blobs['head/huggingface-downloads.json']['collected_at'] = '2026-10-02T23:00:00Z'
+                return github
+            if name == 'hf_wrong_repository':
+                github = standard_github()
+                github.blobs['head/huggingface-downloads.json'] = {**github.blobs['head/huggingface-downloads.json'],
+                                                                     'repository': 'other/repo'}
+                return github
+            if name == 'hf_empty_days':
+                github = standard_github()
+                github.blobs['head/huggingface-downloads.json']['days'] = {}
+                return github
             raise AssertionError(name)
 
         for name in ('missing_daily', 'malformed_blob', 'corrupt_json', 'wrong_repository',
@@ -462,7 +503,8 @@ class DailyReportTests(unittest.TestCase):
                      'baseline_launch_mismatch', 'current_dropped_baseline_dates',
                      'rolling_uniques_below_daily_max', 'rolling_uniques_above_daily_sum',
                      'metrics_row_timestamp_conflicts', 'current_adoption_row_after_collection',
-                     'baseline_package_row_after_collection'):
+                     'baseline_package_row_after_collection',
+                     'missing_hf', 'stale_hf', 'hf_wrong_repository', 'hf_empty_days'):
             with self.subTest(name), self.assertRaises(RuntimeError):
                 r.report(mutation(name), 'traffic-history')
 
@@ -490,6 +532,24 @@ class DailyReportTests(unittest.TestCase):
         sent.assert_not_called()
         self.assertIn('Subject: Pennyroyal GitHub report — 2026-10-03', text)
         self.assertIn('Changes since the 2026-10-02 collection', text)
+
+    def test_hf_no_baseline_shows_unavailable_not_initial_value(self):
+        """First baseline unavailable: no prior HF doc means delta is unavailable, never +1044."""
+        github = standard_github(base=base_documents(('daily.json',)))
+        body, values, _ = r.report(github, 'traffic-history')
+        self.assertIn('- All-time downloads: 1,050 (—)', body)
+        self.assertIn('- Likes: 9 (—)', body)
+        self.assertNotIn('+1044', body)
+        self.assertNotIn('+1050', body)
+
+    def test_hf_separate_from_github_clones_no_combined_people_count(self):
+        body, values, _ = r.report(standard_github(), 'traffic-history')
+        self.assertIn('Hugging Face model', body)
+        self.assertIn('- All-time downloads: 1,050 (+6)', body)
+        self.assertIn('- Rolling 30-day downloads: 920 (separate window, not cumulative)', body)
+        self.assertIn('- Likes: 9 (+1)', body)
+        self.assertIn('- Clones: 30,238', body)
+        self.assertNotIn('combined', body.lower())
 
 
 if __name__ == '__main__':

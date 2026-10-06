@@ -184,11 +184,14 @@ def read_snapshot(github, head, traffic, today):
 def read_current(github, branch):
     head = github.api('git/ref/heads/' + quote(branch, safe=''))['object']['sha']
     documents = read_documents(github, head, {path: True for path in (
-        'daily.json', 'package-downloads.json', 'repository-metrics.json')})
+        'daily.json', 'package-downloads.json', 'repository-metrics.json',
+        'huggingface-downloads.json')})
     traffic = documents['daily.json']
     package = documents['package-downloads.json']
     metrics = documents['repository-metrics.json']
-    for name, value in [('traffic', traffic), ('package', package), ('repository metrics', metrics)]:
+    hf = documents['huggingface-downloads.json']
+    for name, value in [('traffic', traffic), ('package', package), ('repository metrics', metrics),
+                        ('Hugging Face', hf)]:
         validate_document(value, github.repository, name)
     coverage = traffic.get('coverage')
     require(isinstance(coverage, dict) and coverage.get('complete_through_latest_exposed') is True and
@@ -201,10 +204,11 @@ def read_current(github, branch):
     today = now().date()
     require(dt.date.fromisoformat(through) <= today, 'Traffic archive is dated in the future')
     cutoff = required_cutoff(now())
-    for name, value in [('traffic', traffic), ('package', package), ('repository metrics', metrics)]:
+    for name, value in [('traffic', traffic), ('package', package), ('repository metrics', metrics),
+                        ('Hugging Face', hf)]:
         require(timestamp(value['collected_at']) >= cutoff,
                 f'Stale {name} archive; refusing to email a success report')
-    return head, traffic, package, metrics, read_snapshot(github, head, traffic, today)
+    return head, traffic, package, metrics, hf, read_snapshot(github, head, traffic, today)
 
 
 def read_baseline(github, head, collected_at, launch, days):
@@ -218,7 +222,8 @@ def read_baseline(github, head, collected_at, launch, days):
     if not commits:
         return None
     documents = read_documents(github, commits[0]['sha'], {
-        'daily.json': True, 'package-downloads.json': False, 'repository-metrics.json': False})
+        'daily.json': True, 'package-downloads.json': False, 'repository-metrics.json': False,
+        'huggingface-downloads.json': False})
     daily = documents['daily.json']
     validate_document(daily, github.repository, 'baseline traffic')
     require(timestamp(daily['collected_at']) < timestamp(collected_at),
@@ -233,12 +238,13 @@ def read_baseline(github, head, collected_at, launch, days):
             'Baseline traffic archive dates are incomplete or inconsistent')
     require(set(daily['days']) <= set(days),
             'Current archive dropped dates retained by the baseline commit')
-    for name in ('package-downloads.json', 'repository-metrics.json'):
+    for name in ('package-downloads.json', 'repository-metrics.json', 'huggingface-downloads.json'):
         if documents[name] is not None:
             validate_document(documents[name], github.repository, f'baseline {name}')
     return {'collected_at': daily['collected_at'], 'daily': daily,
             'package': documents['package-downloads.json'],
-            'metrics': documents['repository-metrics.json']}
+            'metrics': documents['repository-metrics.json'],
+            'hf': documents['huggingface-downloads.json']}
 
 
 def delta(current, previous):
@@ -250,7 +256,7 @@ def span(days):
 
 
 def report(github, branch):
-    head, traffic, package, metrics, snapshot = read_current(github, branch)
+    head, traffic, package, metrics, hf, snapshot = read_current(github, branch)
     today = now().date()
     through = traffic['coverage']['through_date']
     totals = daily_totals(traffic, 'archive', today)
@@ -268,16 +274,24 @@ def report(github, branch):
                       for day in set(traffic['days']) & set(baseline['daily']['days']))
     adoption_day, adoption = latest_record(metrics, ('stars', 'forks'), 'adoption', today)
     package_day, package_latest = latest_record(package, ('total_downloads',), 'package', today)
+    hf_day, hf_latest = latest_record(hf, ('downloads_all_time', 'downloads_last_30_days', 'likes'),
+                                       'Hugging Face', today)
     _, baseline_adoption = latest_record(baseline['metrics'] if baseline else None,
                                          ('stars', 'forks'), 'baseline adoption', today)
     _, baseline_package = latest_record(baseline['package'] if baseline else None,
                                         ('total_downloads',), 'baseline package', today)
+    _, baseline_hf = latest_record(baseline['hf'] if baseline else None,
+                                   ('downloads_all_time', 'downloads_last_30_days', 'likes'),
+                                   'baseline Hugging Face', today)
 
     values = {
         'stars': adoption['stars'], 'forks': adoption['forks'],
         'views': totals['views'], 'clones': totals['clones'],
         'daily_unique_cloners': totals['daily_unique_cloners'],
         'package_downloads': package_latest['total_downloads'],
+        'hf_all_time': hf_latest['downloads_all_time'],
+        'hf_rolling30': hf_latest['downloads_last_30_days'],
+        'hf_likes': hf_latest['likes'],
     }
     status = {'through_date': through, 'pending': pending, 'baseline_date': baseline_day,
               'new_dates': new_dates, 'revised': revised, 'partial_today': through == today.isoformat()}
@@ -309,6 +323,15 @@ def report(github, branch):
         f'- Container downloads: {values["package_downloads"]:,} '
         f'({delta(values["package_downloads"], baseline_package["total_downloads"] if baseline_package else None)}), '
         f'recorded {package_day} UTC', '',
+        'Hugging Face model',
+        f'- Model: {hf["model_id"]}',
+        f'- All-time downloads: {values["hf_all_time"]:,} '
+        f'({delta(values["hf_all_time"], baseline_hf["downloads_all_time"] if baseline_hf else None)}), '
+        f'observed {hf_day} UTC',
+        f'- Rolling 30-day downloads: {values["hf_rolling30"]:,} (separate window, not cumulative)',
+        f'- Likes: {values["hf_likes"]:,} '
+        f'({delta(values["hf_likes"], baseline_hf["likes"] if baseline_hf else None)}), '
+        f'observed {hf_day} UTC', '',
         'Traffic since launch',
         f'- Views: {values["views"]:,} '
         f'({delta(values["views"], baseline_totals["views"] if baseline_totals else None)})',
