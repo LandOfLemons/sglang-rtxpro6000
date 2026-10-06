@@ -68,7 +68,9 @@ def main():
         (
             kernel
             for provider in providers
-            if (kernel := provider.jit_cache_dir / "fused_moe_120/fused_moe_120.so").is_file()
+            if (
+                kernel := provider.jit_cache_dir / "fused_moe_120/fused_moe_120.so"
+            ).is_file()
         ),
         None,
     )
