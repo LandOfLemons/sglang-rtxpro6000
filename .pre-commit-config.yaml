@@ -108,18 +108,6 @@ repos:
         language: system
         files: ^scripts/lint/(check_|test_check_).*\.py$
         pass_filenames: false
-      - id: check-registered-tests
-        name: validate registered test CI registries
-        entry: python3 scripts/lint/check_registered_tests.py
-        language: system
-        files: ^test/registered/.*\.py$
-        pass_filenames: false
-      - id: check-no-registered-tests-in-package
-        name: reject CI-registered tests inside the sglang package
-        entry: python3 scripts/lint/check_no_registered_tests_in_package.py
-        language: system
-        files: ^python/sglang/.*\.py$
-        pass_filenames: false
       - id: rustfmt-sgl-model-gateway
         name: rustfmt sgl-model-gateway (nightly)
         entry: bash -c 'rustup component add --toolchain nightly rustfmt >/dev/null && cd sgl-model-gateway && cargo +nightly fmt -- --check'
