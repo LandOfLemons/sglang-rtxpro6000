@@ -226,7 +226,7 @@ are recorded in [CHANGES.md](CHANGES.md).
 | CUDA / NVCC | `13.3` / `13.3.73` |
 | GCC / Rust | `15.3.1` / `1.97.1` |
 | PyTorch | `2.13.0+cu130` |
-| FlashInfer | `0.7.0.post1` |
+| FlashInfer | `0.6.17` |
 | NIXL | `1.4.0` |
 | `sglang-kernel` | `0.4.6.post1` |
 | Triton / XGrammar | `3.7.1` / `0.2.1` |
