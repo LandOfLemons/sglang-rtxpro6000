@@ -1,6 +1,6 @@
 # Cumulative changes and upstream status
 
-The exact v2.5.2 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
+The exact v2.5.3 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
 Its lineage extends the v2.4.1 ordered range
 `e7e78940168f..cf811a8c5988`; all prior runtime commits remain in source
 history, including the graph-lifetime trial and its full revert. The integration
@@ -19,6 +19,51 @@ automatic release-container builds on the same dependency stack.
 
 “Local” identifies changes maintained in this fork. Upstream status and PR
 heads are recorded with the release that used them.
+
+## v2.5.3 — Agentic correctness and cache maintenance
+
+The main fixes in this release are the Flash-Next checkpoint error reported in
+[issue #17](https://github.com/jpezzulli/sglang-rtxpro6000/issues/17) and the
+BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
+
+- **Flash-Next checkpoint selection:** select the recurrent state at the
+  correct accepted-token boundary during native MTP. This addresses the
+  phantom-token/file-writing problem reported in #17. Thanks to
+  [barnesea](https://github.com/jpezzulli/sglang-rtxpro6000/issues/17#issuecomment-5852373752)
+  for the boundary analysis and hey-heiko for reproducing and checking it.
+- **BF16 NVMe PLE:** size staging memory using the table's actual element
+  size. The fix for Swift's `PLE lookup needs ... staging rows` error is now
+  included; the separate [v2.5.2 patch](tools/ple_nvme/BF16-STAGING-HOTFIX.md)
+  is no longer needed on v2.5.3.
+- **Streaming tool arguments:** send string arguments as they are generated,
+  so long file-writing calls can show progress before the argument closes.
+  Adapted from [SGLang #41313](https://github.com/sgl-project/sglang/pull/41313).
+- **Reasoning and client compatibility:** preserve quoted tool examples
+  across reasoning-stream chunks, and accept either `thinking` or
+  `enable_thinking` for a lone boolean template setting. Native unknown-tool
+  calls still reach the client for normal error recovery.
+- **Long prompts:** encode eligible prompts in parallel while preserving
+  token IDs, with the existing serial path for other inputs. Adapted from
+  [#41259](https://github.com/sgl-project/sglang/pull/41259).
+- **Cache persistence:** back up fresh write-through chunks and retain their
+  host buffers until in-flight storage writes finish, including when a cached
+  prefix is split. Startup warns about cache filesystem pressure; retired
+  cache cleanup remains under the user's control.
+- **27B/DFlash2:** avoid blocking copies of small prefill metadata arrays,
+  adapted from [#40091](https://github.com/sgl-project/sglang/pull/40091).
+- **NIXL and host allocation:** correct hybrid storage-component counts and
+  include opt-in pinned-host allocation/device-alias support adapted from
+  [LandOfLemons' PR #24](https://github.com/jpezzulli/sglang-rtxpro6000/pull/24).
+  Includes checks of the native Linux transfer path.
+
+Both supported profiles completed full reasoning and tool runs, plus fresh
+64K disk-cache restoration and device-replay checks. The 27B tool rerun used
+the corrected uncapped validation runner. Existing long-context, media and
+performance evidence retains its original source and date. The dependency
+stack and model weights are unchanged.
+
+Literal model end-of-turn markers can still terminate a response; this release
+does not change that model/runtime behavior.
 
 ## v2.5.2 — Memory, cache and setup maintenance
 

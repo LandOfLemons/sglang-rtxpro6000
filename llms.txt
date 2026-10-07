@@ -4,6 +4,10 @@
 
 Canonical repository: https://github.com/jpezzulli/sglang-rtxpro6000
 
+Version 2.5.3 includes the Flash-Next checkpoint correction and BF16 NVMe PLE
+staging hotfix. The separate v2.5.2 PLE patch is not needed on v2.5.3. See
+CHANGES.md for streaming-tool, prompt-encoding and cache improvements.
+
 Both profiles use the same runtime source. The documented recipes use one GPU
 and thinking-enabled agentic inference. Start with the Docker guide for a
 prebuilt image or BUILD.md and RUN.md for native installation. Model weights
@@ -14,7 +18,7 @@ The optional configurator is beta: `./configure-penny --native` or
 `./configure-penny --container`. Use the saved settings and the generated launch
 command; `--check` validates configuration without loading a model. See RUN.md
 for HiCache RAM sizing and the NIXL soft disk budget. Both cache tiers remain
-enabled. TP2 changes await verification from u/StockSpecialist1707.
+enabled. See COMMUNITY-RESULTS.md for other users' setups, including TP2.
 
 ## Start here
 
@@ -41,4 +45,4 @@ enabled. TP2 changes await verification from u/StockSpecialist1707.
 
 - [Backends](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BACKENDS.md): Kernel and execution-path details.
 - [Memory and persistence](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/MEMORY-AND-PERSISTENCE.md): Hybrid cache state, namespaces and restoration.
-- [Limitations](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/LIMITATIONS.md): Hardware, representation and measurement boundaries.
+- [Limitations](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/LIMITATIONS.md): Known issues and hardware considerations.

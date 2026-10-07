@@ -1,8 +1,8 @@
 # Qwen3.8 Flash-Next online FP8 on RTX PRO 6000
 
 Pennyroyal v2.5.0 can convert selected Flash-Next weights to FP8 while loading
-the model. This is an **opt-in, exact-SM120 path** intended for the qualified
-single-GPU NVIDIA RTX PRO 6000 Blackwell recipe. The default remains the
+the model. Enable it with the single-GPU NVIDIA RTX PRO 6000 Blackwell
+(SM120) recipe. The default remains the
 checkpoint's original precision layout.
 
 On the measured RTX PRO 6000 configuration, online FP8 improved
@@ -39,7 +39,7 @@ checkpoint loads. Generation uses the converted weights.
 
 | Runtime component | With online FP8 enabled |
 |---|---|
-| Eligible otherwise-unquantized Flash-Next transformer projections | MXFP8 weights with dynamic MXFP8 activations through the qualified FlashInfer CUTLASS path |
+| Eligible otherwise-unquantized Flash-Next transformer projections | MXFP8 weights with dynamic MXFP8 activations through FlashInfer CUTLASS |
 | HyperConnection mix weights | Row-wise FP8 weights with one scale per output row; prefill materializes transient BF16 operands for the existing compiled path |
 | Output head | Row-wise FP8 weights with aligned per-row scales; the FR-Spec draft shares the converted target head safely |
 | NVFP4 experts and expert routing | Preserved from the checkpoint |
@@ -53,9 +53,11 @@ Conversion is all-or-nothing for each recognized Flash-Next module. Missing
 scale metadata, unsupported tied head weights, unavailable kernels, unexpected
 dtypes, and incompatible shapes stop startup.
 
-## Qualified scope
+<a id="qualified-scope"></a>
 
-The v2.5.0 release qualification retained the normal 524,288-token context,
+## Tests and results
+
+The v2.5.0 tests used the normal 524,288-token context,
 824,384-token GPU KV pool, page size 64, native NEXTN 3/1/4 shape, 24 Mamba
 slots, CUDA graphs, FR-Spec, 32 GiB HiCache and NIXL persistence. Focused tests
 covered real SM120 kernels, changed-input CUDA-graph replay, load-time weight
@@ -79,13 +81,13 @@ precision modes.
 
 The public recipe uses
 [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4).
-Qualification covered performance, reasoning, tools, vision, and a 64/64
-exact-recall check with the v2.5.0 online-FP8 runtime. Other compatible
-checkpoints must preserve the Qwen3.8 Flash-Next architecture, ModelOpt NVFP4
+For other checkpoints, use the Qwen3.8 Flash-Next architecture, ModelOpt NVFP4
 expert layout, tokenizer/FR-Spec mapping, native-MTP shape and expected
 unquantized projection structure.
 
-## Interpretation and limits
+<a id="interpretation-and-limits"></a>
+
+## Choosing your settings
 
 - The reported decode rates exclude time to first token. Cold TTFT did **not**
   improve in the matching 128K and 490K samples.
@@ -93,7 +95,7 @@ unquantized projection structure.
   observations, and the C4 outputs did not all have the same length.
 - The observed standard-pool VRAM difference is useful headroom. The default
   FR-Spec cap remains 824,384. An explicit 1,000,000-token pool was separately
-  qualified with RAM PLE, CPU media preprocessing and one visible GPU, leaving
+  tested with RAM PLE, CPU media preprocessing and one visible GPU, leaving
   5.21 GiB after graphs and at least 1,187 MiB in the sampled media window.
   Served context remains 524,288 tokens; no speed comparison was run. The test
   used CPU media preprocessing.
@@ -101,8 +103,6 @@ unquantized projection structure.
   three of six quoted fully wrapped tool examples were executed when they
   should have remained text. The parser was unchanged, so those failures do
   not isolate online FP8 as the cause.
-- Evidence covers the stated SM120 configurations and tests. Bit-for-bit output
-  parity, other hardware, and general model-quality changes were not measured.
 
 ## Credit
 

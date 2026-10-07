@@ -6,18 +6,18 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Public documentation and distribution branch | `pennyroyal-main-sm120-final`; continues above the runtime release tag |
-| Qualified core runtime source | `a670ea2bdde058819b842f7b7437577810575f7b` |
-| Complete release source | Exact commit selected by `pennyroyal-v2.5.2`, including setup and launcher updates |
+| Core runtime source | `69583da7c71b87ac36371333a19f2749bab72773` |
+| Complete release source | Exact commit selected by `pennyroyal-v2.5.3`, including release packaging updates |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Latest runtime additions | PLE allocation fixes, QSA staging/top-k fixes, HiCache shortfall reclamation, TP2 preparation and configurable cache sizes |
-| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.2 Python/JIT source |
-| Release | v2.5.2 |
-| Release tag | `pennyroyal-v2.5.2` |
+| Latest runtime additions | NEXTN checkpoint selection, BF16 NVMe PLE staging, streaming tools, prompt encoding and cache persistence |
+| Dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.3 Python/JIT source |
+| Release | v2.5.3 |
+| Release tag | `pennyroyal-v2.5.3` |
 | Container build source | Exact commit selected by the release tag; also recorded in the image's OCI revision label |
-| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2`; build digest recorded by the [release workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) |
+| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`; published after a successful build, with its digest recorded by the [release workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) |
 
 The release includes launch recipes, documentation, and measurement summaries.
-v2.5.2 keeps the v2.5.0 dependency stack, optional Flash-Next online FP8 and
+v2.5.3 keeps the v2.5.0 dependency stack, optional Flash-Next online FP8 and
 NVMe PLE, CPU image preprocessing, RAM PLE default, and pinned
 [Froggeric v22.5 template](configs/pennyroyal/templates/README.md). The earlier
 27B release remains available as `qwen38-dflash2-pro6000-20260824`, with its
@@ -39,6 +39,35 @@ graph-lifetime trial remains in history with its complete revert; it contributes
 no change to the released graph implementation. Dependencies and launch
 settings are unchanged. [CHANGES.md](CHANGES.md) records the focused
 two-profile regression scope; existing performance results are not refreshed.
+
+## v2.5.3 source provenance
+
+Runtime source `69583da7c71b87ac36371333a19f2749bab72773` extends public source
+`da33534bf3e147725f49ffc07674ba2a7f34c98b` without a rebase or dependency
+refresh. That base already contains the BF16 NVMe PLE staging fix
+`e6319ae461d9e54d7d777878a4bf7fc503a69f0f`; v2.5.3 includes it in the normal
+release rather than requiring a container overlay.
+
+The additions correct the NEXTN checkpoint boundary from
+[issue #17](https://github.com/jpezzulli/sglang-rtxpro6000/issues/17), adapt
+streaming string arguments from [#41313](https://github.com/sgl-project/sglang/pull/41313),
+parallel prompt encoding from [#41259](https://github.com/sgl-project/sglang/pull/41259),
+and DFlash prefill copies from [#40091](https://github.com/sgl-project/sglang/pull/40091).
+Cache persistence combines the fresh-chunk backup and in-flight host-ownership
+corrections. NIXL component counting and opt-in host aliases adapt
+[PR #24](https://github.com/jpezzulli/sglang-rtxpro6000/pull/24).
+[CHANGES.md](CHANGES.md#v253--agentic-correctness-and-cache-maintenance)
+records user-facing behavior and contributor credit.
+
+Both TP1 profiles completed full reasoning and streaming-tool runs, with
+fresh 64K storage restoration and device replay on each. Native CUDA transfer
+and checkpoint tests also passed. Earlier long-context, media and full host-cache
+campaigns retain their original source and dates in RESULTS.md.
+
+Release packaging refreshes the NVMe adapter's exact source hashes and version
+references above the checked runtime core. The automatic container build checks
+installation and source identity. GPU container results are recorded with
+v2.5.0; the v2.5.3 runtime checks used native installation.
 
 ## v2.5.2 source provenance
 

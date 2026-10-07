@@ -1,7 +1,7 @@
 # Build SGLang for NVIDIA RTX PRO 6000 Blackwell (SM120)
 
 These instructions build and install the Pennyroyal SGLang source used by the
-qualified Qwen3.8-27B/DFlash2 and Qwen3.8 Flash-Next recipes on one 96 GB RTX
+Qwen3.8-27B/DFlash2 and Qwen3.8 Flash-Next recipes on one 96 GB RTX
 PRO 6000. Choose [Fresh install](#fresh-install) for a new environment or
 [Update an existing install](#update-an-existing-install) for a working setup.
 Both install the same source for the two profiles.
@@ -29,7 +29,7 @@ Run this sequence in Bash. It creates a new checkout and Python environment,
 installs the build tools, then installs SGLang and its dependencies once:
 
 ```bash
-git clone --branch pennyroyal-v2.5.2 --single-branch \
+git clone --branch pennyroyal-v2.5.3-setup1 --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 
@@ -46,7 +46,8 @@ uv pip install --prerelease=allow --index-strategy unsafe-best-match \
   --no-build-isolation -e python
 ```
 
-SGLang is now installed as an editable package from this checkout. Keep the
+The `setup1` tag includes the WSL2 configurator update and the same v2.5.3
+runtime. SGLang is installed as an editable package from this checkout. Keep the
 checkout in place while using this environment.
 
 Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
@@ -65,8 +66,8 @@ named `origin`.
 
 ```bash
 cd /path/to/pennyroyal
-git fetch origin tag pennyroyal-v2.5.2
-git switch --detach pennyroyal-v2.5.2
+git fetch origin tag pennyroyal-v2.5.3-setup1
+git switch --detach pennyroyal-v2.5.3-setup1
 source .venv/bin/activate
 
 source scripts/pennyroyal/build-env.sh
@@ -75,7 +76,7 @@ uv pip install --no-build-isolation --no-deps -e python
 ```
 
 This updates SGLang without re-resolving the existing dependencies.
-v2.5.2 reuses the v2.5.0 PyTorch, `sglang-kernel`, FlashInfer, and NIXL
+v2.5.3 reuses the v2.5.0 PyTorch, `sglang-kernel`, FlashInfer, and NIXL
 dependencies. If build tools are missing, install the bootstrap packages from
 the fresh-install sequence, then retry the final command.
 
@@ -97,7 +98,7 @@ Its source build requires Linux, a C++20 compiler, CMake, Meson, Ninja,
 (`libaio-devel` on Fedora or `libaio-dev` on Debian/Ubuntu). The pinned NIXL
 source can build liburing through its Meson wrap when a system copy is absent.
 The configuration below enables io_uring. Choose an install prefix writable by
-the installing operator; `/opt/nvidia/nvda_nixl` was the qualified prefix but
+the installing operator; `/opt/nvidia/nvda_nixl` was the build prefix but
 normally requires administrator preparation.
 
 ```bash
@@ -144,7 +145,7 @@ hf download incoai/Qwen3.8-27B-DFlash2 \
   --local-dir /path/to/qwen38-27b-draft
 ```
 
-The retained 27B performance and behavior campaign used this public
+The 27B performance and reasoning tests used this public
 alternative target:
 
 ```bash
@@ -153,8 +154,7 @@ hf download orcarouter/Qwen3.8-27B-Uncensored-FP8 \
   --local-dir /path/to/qwen38-27b-alternative-target
 ```
 
-The orcarouter checkpoint is an uncensored/abliterated derivative. Its
-provenance matters for reasoning, refusal, and other behavioral results.
+The orcarouter checkpoint is an uncensored/abliterated derivative.
 Review each model card and license.
 
 ## Optional NVMe PLE reader
@@ -215,7 +215,9 @@ are recorded in [CHANGES.md](CHANGES.md).
 
 ## Advanced details
 
-### Qualified environment
+<a id="qualified-environment"></a>
+
+### Build environment
 
 | Component | Version |
 |---|---|
@@ -231,10 +233,9 @@ are recorded in [CHANGES.md](CHANGES.md).
 | `sglang-kernel` | `0.4.6.post1` |
 | Triton / XGrammar | `3.7.1` / `0.2.1` |
 
-These are the tested dependency versions. A fresh install can resolve newer
-versions of unpinned packages, so compare the installed environment when exact
-reproduction matters. The native procedure was reconstructed from the working
-installation; the container build supplies the clean automated build path.
+These are the versions used for the release. A fresh native install can
+resolve newer versions of unpinned packages. Use the release container for
+the packaged environment.
 
 ### Compiler and build jobs
 
@@ -244,8 +245,7 @@ sequence or launching. On a memory-constrained host, use 1 or 2 instead.
 Individual tool settings such as `MAX_JOBS` take precedence when already set;
 unset old overrides if you want the shared budget to apply.
 
-The qualification host used 24 jobs and four NVCC threads; that is a reference
-measurement, not the public default. These limits control compilation, not
+Our machine used 24 jobs and four NVCC threads. These limits control compilation, not
 inference threads or GPU token-pool sizes. Keep the GCC 15 compiler variables
 consistent: `CXX` participates in both NVCC host-compiler selection and the
 JIT fingerprint.
@@ -271,7 +271,7 @@ bundled in this wheel.
 
 ### Source and earlier wheels
 
-The exact v2.5.2 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
+The exact v2.5.3 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
 This release uses updated Python/JIT sources on the existing dependency stack;
 no new prebuilt wheel is distributed. The optional NVMe reader is a separate
 isolated install and is not included in the main SGLang wheel.

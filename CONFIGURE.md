@@ -7,6 +7,21 @@ plain text file that the launchers read. It writes that file and tells you
 what to run next; it does not install packages, download models, or start
 anything.
 
+## Update the setup files
+
+The `pennyroyal-v2.5.3-setup1` tag adds the WSL2 option to the configurator and
+passes it through Docker Compose. It uses the same v2.5.3 runtime and image.
+
+If you already cloned v2.5.3, run these from your Pennyroyal folder. Save any
+changes to tracked files first; your saved settings stay in place.
+
+```bash
+git fetch origin tag pennyroyal-v2.5.3-setup1
+git switch --detach pennyroyal-v2.5.3-setup1
+```
+
+Then rerun the configurator if you want to enable the WSL2 option.
+
 ## Before you start
 
 - Native: finish the install in [BUILD.md](BUILD.md) and download your model
@@ -76,9 +91,10 @@ a checkpoint at `/srv/models/RadixArk-Qwen3.8-Flash-Next-NVFP4` is entered as
   index or UUID when no list is available.
 - **API port** and the two cache sizes below.
 - **Advanced settings**: offered at the end, and skipped by saying no. It
-  covers capacity overrides, online FP8, and where the PLE table lives.
+  covers capacity overrides, online FP8, where the PLE table lives, and the
+  [WSL2 host-memory workaround](RUN.md#wsl2-host-memory-workaround).
   [RUN.md](RUN.md), [FP8.md](FP8.md), and [NVME-PLE.md](NVME-PLE.md) explain
-  those; skipping them keeps the qualified defaults.
+  those; skipping them keeps the defaults.
 
 You then see every value in one review, with a `*` beside the ones you
 changed, and a final confirmation before anything is written. Typing `q` at

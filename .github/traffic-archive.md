@@ -40,6 +40,19 @@ itself is retrieved using Contents API at the workflow's exact commit SHA.
   day-over-day changes. Package downloads are never added to repository clones.
 - `raw/packages/first-run/package.html` and `metadata.json`: immutable public
   package-page baseline, its hash, extracted counters and provenance.
+- `huggingface-downloads.json`: date-keyed observations of public Hugging Face
+  model download counters for `jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4`
+  (all-time downloads, rolling 30-day downloads, likes). The collector reads only
+  the unauthenticated public API metadata endpoint; no model files, config, or
+  HEAD query files are downloaded. First captured **2026-09-17**.
+- `huggingface-snapshots/YYYY-MM-DD/<UTC timestamp>-<run ID>-<attempt>.json`:
+  immutable per-run parsed Hugging Face observations including the complete
+  original `raw_response` API body and its SHA-256 hash, unique per run attempt.
+- `HUGGINGFACE-DOWNLOADS.md`: readable Hugging Face model counters and day-over-day
+  changes. Hugging Face downloads are never added to repository clones or GHCR
+  package downloads.
+- `raw/huggingface/first-run/model.json` and `metadata.json`: immutable first-run
+  API response, its hash, and provenance. Written only on first initialization.
 
 All structured archive documents contain repository, launch date, UTC collection
 time, schema version `1`, and API version `2022-11-28`. Unmodified raw API bodies
@@ -69,6 +82,22 @@ the representation becomes malformed. Package collection runs after repository
 traffic is safely committed, so a package-page failure cannot cost the expiring
 14-day traffic window. The failed workflow remains visible and is retried by the
 existing thegrid watchdog.
+
+The public Hugging Face model API (`https://huggingface.co/api/models/{id}?expand[]=...`)
+returns `downloads` (a rolling 30-day count representing GET/HEAD on designated
+query files) and `downloadsAllTime` (cumulative since model creation, confirmed
+by HuggingFace documentation). The HF collector reads only this public metadata
+endpoint unauthenticated — no model weights, config files, HEAD query files, or
+self-manufactured downloads. Exact daily download history before the first
+archived observation is unavailable and must never be reconstructed by summing
+rolling-window values. The collector preserves the first-run raw API response
+as an immutable artifact, embeds the complete original response in every
+per-run snapshot, and pins the model `createdAt` provenance — the same model
+ID reporting a different creation time fails rather than resetting lifetime
+provenance. A suspicious zero is rejected only for `downloadsAllTime` against
+established positive history; likes may legitimately fall to zero (unlikes).
+Like the package collector, the HF step runs after
+traffic is committed and is retried by the watchdog on failure or staleness.
 
 Never add rolling totals or rolling unique values across snapshots. The summary
 labels daily-unique sums as `sum_of_daily_uniques`; these are not a deduplicated
@@ -127,6 +156,7 @@ To test archive merge/integrity logic without GitHub access:
 ```sh
 python3 .github/scripts/test_archive_traffic.py
 python3 .github/scripts/test_archive_package_downloads.py
+python3 .github/scripts/test_archive_hf_downloads.py
 ```
 
 The first capture exposed 2026-08-22 through 2026-09-04, including all dates from
@@ -148,10 +178,15 @@ enabled, and `Persistent=true` catches up after downtime. A fresh archive requir
 a capture at or after **00:17 UTC**; otherwise the watchdog dispatches the existing
 GitHub workflow, waits for completion, and verifies its writes before the email step.
 
-The watchdog dispatches the existing GitHub workflow if either repository traffic
-or package-download collection is overdue. It adopts a queued/running collector
-instead of dispatching another, waits up to eight minutes, and verifies workflow
-success plus fresh `daily.json` and `package-downloads.json` on `traffic-history`.
+The watchdog dispatches the existing GitHub workflow if repository traffic,
+package-download collection, or Hugging Face model counter collection is overdue.
+A genuinely uninitialized Hugging Face archive (no HF artifacts at all in the
+history tree) counts as overdue and triggers the same dispatch/recovery path;
+once established, a missing or corrupt canonical `huggingface-downloads.json`
+fails loudly instead of silently re-initializing. It adopts a queued/running
+collector instead of dispatching another, waits up to
+eight minutes, and verifies workflow success plus fresh `daily.json`,
+`package-downloads.json`, and `huggingface-downloads.json` on `traffic-history`.
 Authentication, transport, archive, or workflow failures leave history untouched,
 skip the email, and mark the single daily service failed for the existing journal
 alert path. The existing GitHub workflow concurrency group serializes collectors.
@@ -166,10 +201,46 @@ when the service is available. A thegrid outage is caught up after user-manager
 startup; data absent from GitHub's retention window cannot be reconstructed.
 
 The report uses the existing host `mail` → `msmtp` sender. It keeps no local
-report state or report history; it reads GitHub at send time. Its report includes
-adoption/package deltas, launch totals, daily and rolling traffic, referrers and
-popular paths. Daily unique sums are labeled honestly and never presented as a
-deduplicated lifetime-person count.
+report state or report history and never calls the live `traffic/*` endpoints:
+the report is a read-only view of one pinned `traffic-history` commit, reading the
+current canonical `daily.json`, `package-downloads.json`,
+`repository-metrics.json`, and `huggingface-downloads.json` plus the one traffic
+snapshot whose `collected_at` equals `daily.json`'s, which supplies the rolling
+totals, referrers, and popular paths. The snapshot's dated rows must agree with the canonical archive for
+every date at or after launch (legitimate prelaunch exposure stays out of
+lifetime totals), and the email names the actual first/last dates of the
+returned rolling window rather than assuming fourteen days, so a regressed
+window is never misdated. Two reads of the same commit render identically.
+Daily unique sums are
+labeled honestly and never presented as a deduplicated lifetime-person count;
+clones and container downloads are never presented as distinct users.
+
+Change figures are true net differences against the last archive commit before
+the current collection's UTC day, located with the commits API pinned to the
+same head (`commits?sha=<head>&until=<one second before that day>&per_page=1`);
+that commit's canonical histories are read without the current-capture freshness
+requirement but with the same identity, coverage, and contiguity validation as
+the current archive, including an identical launch date and no baseline dates
+missing from the current archive, so lost history fails loudly instead of
+inventing growth or negative corrections. Cumulative views, clones, and summed daily unique cloners are
+current archive sums minus baseline sums, so delayed GitHub corrections to
+older dates and newly exposed backfilled dates are included; stars, forks, and
+container downloads compare that baseline's latest canonical records. All
+deltas are labeled once as `Changes since the <date> collection`, using the
+baseline's actual collection date and never claiming a previous email. With no
+earlier commit the report says `Baseline unavailable` and shows no change
+figures instead of guessing `+0`. The body leads with the last recorded traffic
+day, the exact completed UTC dates still pending from GitHub (kept unknown,
+never zero-filled, never treated as an outage because age alone cannot tell a
+delayed API from a slow day), and either `New traffic dates: <range>`, `No newer
+traffic date since <baseline collection>`, or `Baseline unavailable`;
+same-date GitHub corrections are reported as revised recorded counts, not as a
+new date. Today's bucket is labeled partial. The subject is the stable
+`Pennyroyal GitHub report — <local date>` with no stale WARNING prefix.
+Collection failures (a capture before the 00:17 UTC cutoff, malformed or
+incomplete archives, a missing or mismatched current snapshot, future-dated
+days) still fail loudly and skip the email. `--dry-run` prints the subject and
+the body and sends nothing.
 
 Installed locations:
 

@@ -820,6 +820,58 @@ class NativePlanTests(FixtureMixin):
         self.assertEqual(plan.env["MY_ADVANCED"], "keep $this")
         self.assertEqual(plan.config.unknown, {"MY_ADVANCED": "keep $this"})
 
+    # --- WSL2 host-memory workaround (SGLANG_HICACHE_TORCH_PINNED_ALLOC) -----
+
+    def wsl2_spec(self):
+        spec = pc.specs_for("native")["SGLANG_HICACHE_TORCH_PINNED_ALLOC"]
+        self.assertEqual(spec.kind, "bool")
+        self.assertEqual(spec.default, "false")
+        self.assertTrue(spec.advanced)
+        return spec
+
+    def test_wsl2_flag_is_saved_normalized_and_exported_to_the_recipe(self):
+        self.wsl2_spec()
+        for answer, wanted in (("yes", "true"), ("1", "true"), ("on", "true"),
+                              ("no", "false"), ("0", "false"), ("off", "false"),
+                              ("true", "true"), ("FALSE", "false")):
+            plan = self.native_plan({**self.native_env(),
+                                     "SGLANG_HICACHE_TORCH_PINNED_ALLOC": answer})
+            self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], wanted)
+            self.assertIn(f"SGLANG_HICACHE_TORCH_PINNED_ALLOC={wanted}",
+                          pc.launch_display(plan))
+
+    def test_unset_wsl2_flag_off_by_default_and_inherits_only_when_unsaved(self):
+        plan = self.native_plan(self.native_env())
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
+        plan = self.native_plan(self.native_env(),
+                               environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"})
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
+
+    def test_explicit_false_wsl2_flag_beats_an_inherited_true_natively(self):
+        plan = self.native_plan(
+            {**self.native_env(), "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "false"},
+            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"})
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
+        self.assertEqual(plan.origins["SGLANG_HICACHE_TORCH_PINNED_ALLOC"],
+                         "saved file")
+
+    def test_invalid_wsl2_flag_fails_clearly(self):
+        spec = self.wsl2_spec()
+        for bad in ("maybe", "2", "true false", "yes please"):
+            with self.assertRaises(pc.ConfigError) as caught:
+                pc.validate_value(spec, bad, "test")
+            self.assertIn("SGLANG_HICACHE_TORCH_PINNED_ALLOC must be true or "
+                          f"false, got {bad!r}", str(caught.exception))
+        self.write_native_config({**self.native_env(),
+                                  "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "maybe"})
+        run = subprocess.run([sys.executable, str(SCRIPTS / "penny_config.py"),
+                              "--mode", "native", "--config",
+                              str(self.config_path), "--check"],
+                             capture_output=True, text=True, check=False)
+        self.assertEqual(run.returncode, 2)
+        self.assertIn("SGLANG_HICACHE_TORCH_PINNED_ALLOC must be true or false",
+                      run.stderr)
+
     def test_check_and_show_config_exercise_the_real_cli(self):
         self.write_native_config(self.native_env())
         run = subprocess.run([sys.executable, str(SCRIPTS / "penny_config.py"),
@@ -857,10 +909,12 @@ class LauncherTests(FixtureMixin):
                         "printf 'argv=%s\\0' \"$0\" > \"$CAPTURE\"\n"
                         'for n in REPO_ROOT SGLANG_EXE PYTHON TARGET_MODEL '
                         'CACHE_BASE NIXL_STORAGE_BASE CUDA_VISIBLE_DEVICES '
-                        'SGLANG_HICACHE_NIXL_MAX_CACHE_GB MY_KEY; do '
+                        'SGLANG_HICACHE_NIXL_MAX_CACHE_GB '
+                        'SGLANG_HICACHE_TORCH_PINNED_ALLOC MY_KEY; do '
                         'printf "%s=%s\\0" "$n" "${!n-}" >> "$CAPTURE"; done\n')
         stub.chmod(0o755)
         self.write_native_config({**self.native_env(), "GPU": "1",
+                                 "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "yes",
                                  "MY_KEY": "value with spaces $literal"})
         env = dict(os.environ, CAPTURE=str(capture))
         run = subprocess.run([str(ROOT / "run-penny"), "--config",
@@ -877,6 +931,8 @@ class LauncherTests(FixtureMixin):
         self.assertEqual(fields["CUDA_VISIBLE_DEVICES"], "1")
         self.assertEqual(fields["MY_KEY"], "value with spaces $literal")
         self.assertEqual(fields["SGLANG_HICACHE_NIXL_MAX_CACHE_GB"], "0")
+        # The WSL2 workaround is normalized on save and reaches the recipe.
+        self.assertEqual(fields["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
         self.assertIn("Pennyroyal configuration", run.stderr)
 
     def test_run_penny_blank_saved_key_reaches_recipe_as_empty(self):
@@ -1249,6 +1305,58 @@ class ContainerPlanTests(FixtureMixin):
         config = pc.load_config("container", self.env_dir / ".env", {}, self.repo)
         plan = pc.build_plan("container", config, {}, repo_root=self.repo)
         self.assertIn("does not exist yet", self.messages(plan, "warn"))
+
+    # --- WSL2 host-memory workaround (SGLANG_HICACHE_TORCH_PINNED_ALLOC) -----
+
+    def test_compose_file_carries_the_wsl2_pinned_alloc_with_an_off_default(self):
+        text = (ROOT / pc.COMPOSE_RELPATH).read_text()
+        self.assertIn(
+            "SGLANG_HICACHE_TORCH_PINNED_ALLOC: "
+            "${SGLANG_HICACHE_TORCH_PINNED_ALLOC:-false}", text)
+        self.assertIn("#SGLANG_HICACHE_TORCH_PINNED_ALLOC=false",
+                      (ROOT / "docker/pennyroyal/.env.example").read_text())
+
+    def test_saved_wsl2_flag_reaches_the_rendered_container_environment(self):
+        plan = self.container_plan({**self.base_values(),
+                                    "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"},
+                                   environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC":
+                                            "false"})
+        # The saved file wins over the inherited shell value.
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
+        self.assertEqual(plan.forced_env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"],
+                         "true")
+        self.assertIn("SGLANG_HICACHE_TORCH_PINNED_ALLOC=true", plan.next_command)
+        rendered = self.run_printed_command(plan)
+        self.assertIn('SGLANG_HICACHE_TORCH_PINNED_ALLOC: "true"', rendered)
+
+    def test_explicit_false_wsl2_flag_beats_an_inherited_true(self):
+        plan = self.container_plan(
+            {**self.base_values(), "SGLANG_HICACHE_TORCH_PINNED_ALLOC": "false"},
+            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"})
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
+        self.assertIn('SGLANG_HICACHE_TORCH_PINNED_ALLOC: "false"',
+                      self.run_printed_command(plan))
+
+    def test_unset_wsl2_flag_keeps_the_inherited_value_or_the_off_default(self):
+        # Not saved at all: the inherited value is carried to the container.
+        plan = self.container_plan(
+            self.base_values(),
+            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"})
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
+        self.assertIn('SGLANG_HICACHE_TORCH_PINNED_ALLOC: "true"',
+                      self.run_printed_command(plan))
+        # Nothing saved and nothing inherited: the documented off default.
+        plan = self.container_plan(self.base_values())
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
+
+    def test_saved_blank_wsl2_flag_resets_to_off_and_suppresses_the_shell(self):
+        plan = self.container_plan(
+            {**self.base_values(), "SGLANG_HICACHE_TORCH_PINNED_ALLOC": ""},
+            environ={"SGLANG_HICACHE_TORCH_PINNED_ALLOC": "true"})
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
+        self.assertIn("documented default", plan.origins[
+            "SGLANG_HICACHE_TORCH_PINNED_ALLOC"])
+
 
 
 class AtomicWriteTests(unittest.TestCase):

@@ -1,15 +1,16 @@
 # Pennyroyal container
 
-This Compose service runs the same Pennyroyal v2.5.2 source and launch recipes
+This Compose service runs the same Pennyroyal v2.5.3 source and launch recipes
 as the native installation. The default is Flash-Next with FR-Spec. Native
 installation remains supported and is documented in [`BUILD.md`](../../BUILD.md)
 and [`RUN.md`](../../RUN.md).
 
-The prebuilt image is available at
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2`. It includes Python, the CUDA
+The release image is named
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. It includes Python, the CUDA
 toolchain, NIXL POSIX, and prebuilt FlashInfer kernels. The host supplies the
 NVIDIA driver and model files. Follow the setup below; Compose will pull the
-image when you start it.
+image when you start it. Release images become available after the build
+and CPU installation checks pass.
 
 ## Prerequisites
 
@@ -47,16 +48,17 @@ replace this setting.
 
 ## Get the Compose files
 
-Get the matching launch and Compose files from the release tag:
+Get the launch and Compose files, including the WSL2 setup update:
 
 ```bash
-git clone --depth 1 --branch pennyroyal-v2.5.2 \
+git clone --depth 1 --branch pennyroyal-v2.5.3-setup1 \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 ```
 
-This checkout supplies configuration and documentation; Docker pulls the
-prebuilt image; no local SGLang build is involved.
+The `setup1` tag updates configuration and documentation for the same v2.5.3
+image. Docker pulls the prebuilt image; no local SGLang build is involved.
+Already have a v2.5.3 checkout? [Update the setup files](../../CONFIGURE.md#update-the-setup-files).
 
 ## Guided setup
 
@@ -186,25 +188,27 @@ docker compose down
 `down` allows up to two minutes for shutdown, then removes the container and
 network. The three bind-mounted host directories remain intact.
 
-## Image checks and command boundary
+<a id="image-checks-and-command-boundary"></a>
+
+## Check the image and run commands
 
 The entrypoint exposes two non-serving checks. The CPU-only import check skips
 device work:
 
 ```bash
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2 --help
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2 --check
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --help
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --check
 ```
 
-Arbitrary commands require the explicit `exec` boundary:
+To run another command inside the image, use `exec`:
 
 ```bash
 docker compose run --rm pennyroyal exec .venv/bin/python --version
 ```
 
-The v2.5.2 image build runs the automated CPU installation check shown above.
-Both profiles were regression-tested natively on the release source. The fresh
-container GPU qualification remains the v2.5.0 result: both profiles passed API
+Release image builds run the automated CPU installation check shown above.
+Both profiles were regression-tested natively on the release source. In the
+v2.5.0 container tests, both profiles passed API
 schema/tool checks, 64K prefill, 1,024-token C1/C4 decode, JPEG and static-video
 checks, and NIXL reuse after container restart. Each restored 63,872 of 63,906
 prompt tokens from storage and returned exact `READY`. That GPU serving test
@@ -224,15 +228,29 @@ docker compose up -d --force-recreate
 Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
 `SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default.
 
+### WSL2
+
+Enable the HiCache host-memory workaround by adding this to `.env`:
+
+```dotenv
+SGLANG_HICACHE_TORCH_PINNED_ALLOC=true
+```
+
+The beta configurator also offers **WSL2 host-memory workaround** under
+**Advanced**. It is off by default; leave it off on native Linux. Recreate an
+existing container after changing the setting, using the command above.
+
+### Other settings
+
 `PENNY_REASONING_EFFORT` is a launcher-level convenience (PR#18): unset
-(default) keeps the recipes' qualified `medium` default chat-template
+(default) keeps the recipes' `medium` default chat-template
 kwargs, and `none|minimal|low|medium|high|xhigh|max` rewrites just that
 key before launch. It is launcher-only -- the server does not read it --
 and an explicit per-request `reasoning_effort` always wins over the
 default. An invalid value stops the container at launch.
 
 `TP_SIZE=2` asks the Next recipes for two tensor-parallel ranks (the
-qualified default is `TP_SIZE=1`), but `TP_SIZE` does not grant GPU access:
+default is `TP_SIZE=1`), but `TP_SIZE` does not grant GPU access:
 this compose.yaml reserves exactly one GPU under
 `deploy.resources.reservations.devices`, and Compose users who want TP2 must
 also edit that existing reservation to name two explicit ids — the complete
@@ -343,16 +361,13 @@ read-only. Omit the override when the engine does not enforce SELinux labels.
 ## Release builds
 
 Publishing a GitHub release builds its exact tagged source and uploads the
-matching versioned image automatically. For example, `pennyroyal-v2.5.2`
-produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.2`. Draft releases and ordinary
+matching versioned image automatically. For example, `pennyroyal-v2.5.3`
+produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. Draft releases and ordinary
 branch pushes do not publish a release image. No moving `latest` tag is used.
 
 The build checks package versions, the source revision and import location,
 launcher syntax, the entrypoint and the NIXL POSIX plugin without a GPU. A
-failed check fails the workflow and leaves the version tag unchanged. GPU
-regression remains separate: routine source-only maintenance uses the tested
-native runtime evidence, while changes to the container's dependency stack or
-device handling warrant another GPU container check.
+failed check fails the workflow and leaves the version tag unchanged.
 
 For a failed build, rerun the **Pennyroyal container** workflow in Actions.
 Alternatively, run it manually against the release's Git tag with both inputs

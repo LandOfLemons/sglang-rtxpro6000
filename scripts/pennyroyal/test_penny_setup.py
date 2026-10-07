@@ -414,6 +414,7 @@ class SetupSessionTests(FixtureMixin):
              "",                        # PLE placement menu: Enter keeps ram
              "/nvme-unused-with-ram",   # free-text path stays free text
              "true",                    # online FP8 chosen from its menu
+             "",                        # WSL2 host memory: Enter keeps false
              "",                        # forward tools: Enter keeps true
              "", "", "", "",            # capacity/build jobs: Enter = blank
              "/opt/nixl",               # advanced free-text paths below...
@@ -432,6 +433,41 @@ class SetupSessionTests(FixtureMixin):
         # A boolean advanced key is also a menu: [1]/'true' selected true.
         self.assertEqual(saved["SGLANG_SM120_ONLINE_MXFP8"], "true")
         self.assertIn("[1] true\n  [2] false", output)
+
+    def test_wsl2_host_memory_workaround_lives_in_the_advanced_section(self):
+        # Declined advanced section: the question is never asked and nothing is
+        # saved, so the default allocator stays untouched.
+        code, output, path = self.run_setup(
+            ["next"] + self.basics(str(self.next_model)) + ["n", "y"])
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("WSL2 host-memory workaround", output)
+        self.assertNotIn("SGLANG_HICACHE_TORCH_PINNED_ALLOC", pc.read_env_file(path))
+        # Advanced section, answered with the established yes/no words: the
+        # question carries a human explanation and saves the normalized bool.
+        advanced = ["", str(self.base / "ple-snap"), "", "yes", "",
+                    "", "", "", "", "/opt/nixl",
+                    str(self.venv / "bin" / "sglang"), str(self.venv / "bin" / "python")]
+        code, output, path = self.run_setup(
+            ["next"] + self.basics(str(self.next_model)) + ["y"] + advanced + ["y"])
+        self.assertEqual(code, 0, output)
+        asked = output.split("Review")[0]
+        self.assertIn("WSL2 host-memory workaround", asked)
+        self.assertIn("pinned host memory", asked)
+        self.assertIn("[1] true\n  [2] false", asked)
+        saved = pc.read_env_file(path)
+        self.assertEqual(saved["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
+        plan = pc.build_plan("native", pc.load_config("native", path, {},
+                                                      self.repo), {},
+                             repo_root=self.repo)
+        self.assertEqual(plan.env["SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "true")
+        # 'no' on the same menu is an explicit false, not a blank.
+        code, output, path = self.run_setup(
+            ["next"] + self.basics(str(self.next_model))
+            + ["y"] + advanced[:3] + ["no"] + advanced[4:] + ["y"],
+            config_path=self.base / "wsl2-off.env")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(pc.read_env_file(self.base / "wsl2-off.env")[
+            "SGLANG_HICACHE_TORCH_PINNED_ALLOC"], "false")
 
     def test_media_menu_keeps_saved_device_and_cancels_without_writes(self):
         # A saved cuda:2 (beyond the fixed rows) gets its own row and Enter
@@ -732,13 +768,14 @@ class SetupSessionTests(FixtureMixin):
         # Enter on the shown RAM size keeps the saved 2 GB.
         self.assertIn("variable PENNY_HICACHE_SIZE_GB", output)
         # Opening the advanced section offers the saved jobs count as default.
-        # Eleven answers cover the advanced keys (two menus, the capacity
+        # Twelve answers cover the advanced keys (three menus, the capacity
         # knobs, the install paths); every one of them presses Enter.
         code, output, path = self.run_setup(
             [""] + self.basics("") + ["y",
                                       "",                       # PLE menu: ram
                                       "/nvme-unused-with-ram",  # snapshot path
                                       "false",                  # online FP8
+                                      "",                       # WSL2 pinned host memory
                                       "true",                   # unknown tools
                                       "", "", "", "",           # capacity + jobs
                                       "/opt/nixl",              # NIXL prefix
