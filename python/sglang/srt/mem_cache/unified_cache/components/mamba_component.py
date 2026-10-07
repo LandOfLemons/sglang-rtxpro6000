@@ -884,6 +884,27 @@ class MambaComponent(TreeComponent):
             if insert_result is not None:
                 insert_result.mamba_exist = False
 
+    def _token_depth(self, node: UnifiedTreeNode) -> int:
+        depth = 0
+        root = self.tree_core.root_node
+        cur = node
+        while cur is not None and cur is not root:
+            if cur.key is not None:
+                depth += len(cur.key)
+            cur = cur.parent
+        return depth
+
+    def _path_tail_depth(self, node: UnifiedTreeNode) -> int:
+        cur = node
+        while len(cur.children) == 1:
+            cur = next(iter(cur.children.values()))
+        return self._token_depth(cur)
+
+    def _mamba_host_slot_counts(self) -> tuple[int, int]:
+        pool = self.cache.host_pool_group.get_pool(PoolName.MAMBA)
+        total = int(pool.size)
+        return total - int(pool.available_size()), total
+
     def drive_host_eviction(
         self,
         num_tokens: int,
@@ -897,9 +918,23 @@ class MambaComponent(TreeComponent):
         ct = self.component_type
         host_lru = self.tree_core.host_lru_lists[ct]
         while tracker[ct] < num_tokens:
-            x = self._select_host_eviction_candidate(host_lru)
+            x, kind = self._select_host_eviction_candidate(host_lru)
             if x is None:
                 break
+            used, total = self._mamba_host_slot_counts()
+            logger.info(
+                "mamba host reclaim kind=%s depth=%s tail=%s children=%s "
+                "session_ref=%s host_lock=%s lock=%s used=%s total=%s",
+                kind,
+                self._token_depth(x),
+                self._path_tail_depth(x),
+                len(x.children),
+                self.session_ref(x),
+                x.component_data[ct].host_lock_ref,
+                x.component_data[ct].lock_ref,
+                used,
+                total,
+            )
             cd = x.component_data[ct]
             if x in self.tree_core.evictable_host_leaves and (
                 not self.tree_core.enable_session_radix_cache
@@ -970,7 +1005,21 @@ class MambaComponent(TreeComponent):
         finally:
             if cursor_started:
                 host_lru.cursor_end()
-        return selected if selected is not None else fallback
+        chosen = selected if selected is not None else fallback
+        if chosen is None:
+            return None, None
+        if selected is not None:
+            return chosen, "interior"
+        cd = chosen.component_data[self.component_type]
+        if chosen in self.tree_core.evictable_host_leaves:
+            kind = "leaf"
+        elif cd.host_lock_ref > 0 or cd.lock_ref > 0:
+            kind = "locked"
+        elif len(chosen.children) != 1:
+            kind = "fork"
+        else:
+            kind = "fallback"
+        return chosen, kind
 
     def _has_later_complete_boundary(self, node: UnifiedTreeNode) -> bool:
         """Whether a single-child continuation has a later reusable boundary."""
