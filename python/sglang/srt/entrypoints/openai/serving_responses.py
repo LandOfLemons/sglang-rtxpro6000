@@ -22,6 +22,12 @@ from openai.types.responses import (
     ResponseOutputText,
     ResponseReasoningItem,
 )
+from openai.types.responses.response_content_part_added_event import (
+    PartReasoningText as ResponseReasoningTextAddedPart,
+)
+from openai.types.responses.response_content_part_done_event import (
+    PartReasoningText as ResponseReasoningTextDonePart,
+)
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.response_reasoning_item import (
@@ -2090,6 +2096,20 @@ class OpenAIServingResponses(OpenAIServingChat):
                         )
                     )
                 )
+                events.append(
+                    _send_event(
+                        openai_responses_types.ResponseContentPartDoneEvent(
+                            type="response.content_part.done",
+                            item_id=reasoning_state["item_id"],
+                            sequence_number=-1,
+                            output_index=reasoning_state["output_index"],
+                            content_index=0,
+                            part=ResponseReasoningTextDonePart(
+                                type="reasoning_text", text=text
+                            ),
+                        )
+                    )
+                )
             events += [
                 _send_event(
                     openai_responses_types.ResponseOutputItemDoneEvent(
@@ -2280,6 +2300,19 @@ class OpenAIServingResponses(OpenAIServingChat):
                                     summary_index=0,
                                     part=ResponseReasoningSummaryAddedPart(
                                         type="summary_text", text=""
+                                    ),
+                                    sequence_number=-1,
+                                )
+                            )
+                        else:
+                            yield _send_event(
+                                openai_responses_types.ResponseContentPartAddedEvent(
+                                    type="response.content_part.added",
+                                    item_id=item_id,
+                                    output_index=reasoning_state["output_index"],
+                                    content_index=0,
+                                    part=ResponseReasoningTextAddedPart(
+                                        type="reasoning_text", text=""
                                     ),
                                     sequence_number=-1,
                                 )
