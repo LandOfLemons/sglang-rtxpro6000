@@ -1406,6 +1406,7 @@ class Req(ReqDllmMixin):
                 self.host_hit_length,
                 self.mamba_host_hit_length,
                 self.mamba_branching_seqlen,
+                self.best_match_node,
             )
             if sig != getattr(self, "_mamba_match_sig", None):
                 self._mamba_match_sig = sig
@@ -1429,7 +1430,7 @@ class Req(ReqDllmMixin):
                 logger.info(
                     "mamba match rid=%s session=%s prefix=%s input=%s "
                     "full_kv=%s device=%s host_hit=%s mamba_host=%s "
-                    "branching=%s mamba_used=%s mamba_total=%s",
+                    "branching=%s node=%s mamba_used=%s mamba_total=%s",
                     self.rid,
                     self.session_id,
                     prefix,
@@ -1439,6 +1440,7 @@ class Req(ReqDllmMixin):
                     self.host_hit_length,
                     self.mamba_host_hit_length,
                     self.mamba_branching_seqlen,
+                    self.best_match_node,
                     mamba_used,
                     mamba_total,
                 )
