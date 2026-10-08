@@ -50,31 +50,45 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(summary["out_tok_s"], 0)
         self.assertEqual(summary["trunc_pct"], 0.0)
 
+    def test_one_request_counts_its_own_forward(self):
+        # 100 tokens over a 10s forward. The clock is that forward, so the
+        # wall rate is 10 and the GPU is busy for the whole span.
+        lines = [_line("2026-09-29 13:00:10", 100, 0, 100, 0, 0, 10000, 10000)]
+        summary = report.summarize(report.parse_requests(lines))
+        self.assertEqual(summary["span_s"], 10.0)
+        self.assertEqual(summary["out_tok_s"], 10)
+        self.assertEqual(summary["mean_req_tok_s"], 10)
+        self.assertEqual(summary["busy_pct"], 100.0)
+
     def test_wall_speed_counts_idle_time_between_finishes(self):
-        # 200 output tokens across 10s of clock. Each decode lasts 1s, so the
-        # decode rate is 100 tokens/s while the wall rate is 20.
+        # Each request decodes for 1s. The span runs from the first forward
+        # start to the second finish, 11s, and 9s of that is idle.
         lines = [
             _line("2026-09-29 13:00:00", 100, 0, 100, 0, 0, 1000, 1000),
             _line("2026-09-29 13:00:10", 100, 0, 100, 0, 0, 1000, 1000, rid="b" * 32),
         ]
         summary = report.summarize(report.parse_requests(lines))
-        self.assertEqual(summary["span_s"], 10.0)
-        self.assertEqual(summary["out_tok_s"], 20)
+        self.assertEqual(summary["span_s"], 11.0)
+        self.assertEqual(summary["out_tok_s"], 18)
+        self.assertEqual(summary["mean_req_tok_s"], 100)
         self.assertEqual(summary["decode_tok_s"], 100)
-        self.assertEqual(summary["busy_pct"], 10.0)
+        self.assertEqual(summary["busy_pct"], 18.2)
         self.assertEqual(summary["peak_inflight"], 1)
 
     def test_overlapping_decodes_share_one_clock(self):
-        # Finishes 5s apart. Each decode is 10s, so they overlap and the union
-        # is 15s, not 20s. The overlap before the first finish is outside the
-        # wall span, so the peak inside that span is one.
+        # Finishes 5s apart. Each forward is 10s, so the span is 15s and the
+        # two forwards overlap. Wall speed counts that shared clock once.
+        # Mean request speed stays at 10, because each request still took 10s.
         lines = [
             _line("2026-09-29 13:00:10", 100, 0, 100, 0, 0, 10000, 10000),
             _line("2026-09-29 13:00:15", 100, 0, 100, 0, 0, 10000, 10000, rid="b" * 32),
         ]
         summary = report.summarize(report.parse_requests(lines))
+        self.assertEqual(summary["span_s"], 15.0)
+        self.assertEqual(summary["out_tok_s"], 13)
+        self.assertEqual(summary["mean_req_tok_s"], 10)
         self.assertEqual(summary["decode_tok_s"], 13)
-        self.assertEqual(summary["peak_inflight"], 1)
+        self.assertEqual(summary["peak_inflight"], 2)
         self.assertEqual(summary["busy_pct"], 100.0)
 
     def test_prefill_rate_uses_the_union_of_prefill_intervals(self):

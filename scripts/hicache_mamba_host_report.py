@@ -9,7 +9,9 @@ new session starts.
 
 The log timestamp on a ReqTimeStats line is completion, to the second.
 ``entry_time`` plus queue plus forward is the precise finish when it is
-present. Idle time inside the span counts.
+present. The span runs from the first forward start to the last finish.
+Idle time inside that span counts. A single request's rate is its output
+divided by its own forward, which includes prefill.
 
 ``cached_input_len`` is the Mamba-truncated prefix, so ``hit`` is the resume
 the request could use. The first ``mamba match`` line for a request keeps
@@ -18,7 +20,11 @@ Later lines for the same rid are ignored.
 
 Fields:
 
-- out_tok_s: output tokens / wall span. This is the wall output speed.
+- out_tok_s: output tokens / wall span. The span starts at the first forward
+  and ends at the last finish. This is the wall output speed.
+- mean_req_tok_s: mean of each request's output / its own forward. Prefill
+  counts. Queue and time between requests do not. This falls as more
+  requests run together, because each decode gets slower.
 - busy_pct: share of that span with at least one forward running.
 - mean_inflight, peak_inflight: concurrency over that span.
 - hit: cached_input_len / input_len, summed across requests.
@@ -59,6 +65,7 @@ _FIELDS = (
     "n",
     "span_s",
     "out_tok_s",
+    "mean_req_tok_s",
     "busy_pct",
     "mean_inflight",
     "peak_inflight",
@@ -209,7 +216,12 @@ def summarize(rows: list[dict]) -> dict:
     cached = sum(row["cached"] for row in rows)
     output = sum(row["output"] for row in rows)
     uncached = prompt - cached
-    wall = max(rows[-1]["t"] - rows[0]["t"], 1.0)
+    # Count the forward that produced the tokens, not just the gap between
+    # completions. One request then reports output / its forward, and 0% busy
+    # is no longer what a full forward looks like.
+    start = min(row["t"] - row["forward_ms"] / 1000 for row in rows)
+    end = max(row["t"] for row in rows)
+    wall = end - start
     prefill_iv = []
     decode_iv = []
     forwards = []
@@ -223,7 +235,12 @@ def summarize(rows: list[dict]) -> dict:
     prefill_busy = _union_seconds(prefill_iv)
     decode_busy = _union_seconds(decode_iv)
     prefill_s = [row["prefill_ms"] / 1000 for row in rows]
-    mean, peak, busy = _occupancy(forwards, rows[0]["t"], rows[0]["t"] + wall)
+    mean, peak, busy = _occupancy(forwards, start, end if wall else start)
+    request_rates = [
+        row["output"] / (row["forward_ms"] / 1000)
+        for row in rows
+        if row["forward_ms"] > 0
+    ]
 
     paired = [row for row in rows if row.get("full_kv") is not None]
     kv_sum = sum(float(row["full_kv"]) for row in paired)
@@ -235,6 +252,9 @@ def summarize(rows: list[dict]) -> dict:
         "n": len(rows),
         "span_s": round(wall, 1),
         "out_tok_s": round(output / wall) if wall else 0,
+        "mean_req_tok_s": round(sum(request_rates) / len(request_rates))
+        if request_rates
+        else 0,
         "busy_pct": busy,
         "mean_inflight": mean,
         "peak_inflight": peak,
