@@ -1023,6 +1023,12 @@ class Envs:
     # SM120. Large linears use MXFP8; lm_head and HyperConnection mix weights
     # use rowwise weight-only FP8. An explicit unsupported request fails boot.
     SGLANG_SM120_ONLINE_MXFP8 = EnvBool(False)
+    # Opt-in: route the resident rowwise-FP8 target/draft output heads through
+    # the donor's low-row W8A16 Triton GEMV. Larger batches and unsupported
+    # layouts keep the existing rowwise kernel; MAX_M can only shrink the row
+    # budget, never exceed the kernel's own 16-row limit.
+    SGLANG_FP8_W8A16_GEMV = EnvBool(False)
+    SGLANG_FP8_W8A16_GEMV_MAX_M = EnvInt(16)
     # Route decode-size HC mix through the fused CuTe split-K GEMM pair
     # instead of the persistent Triton mix.
     SGLANG_HC_MIX_CUDA = EnvBool(True)
