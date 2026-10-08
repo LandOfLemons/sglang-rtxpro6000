@@ -259,7 +259,9 @@ def _w8a16_gemv_kernel(
             if EVEN_K:
                 xv = tl.load(x_ptr + kk * stride_xk).to(tl.float32)
             else:
-                xv = tl.load(x_ptr + kk * stride_xk, mask=k_mask, other=0.0).to(tl.float32)
+                xv = tl.load(x_ptr + kk * stride_xk, mask=k_mask, other=0.0).to(
+                    tl.float32
+                )
             if NORM_G > 0:
                 if EVEN_K:
                     zv = tl.load(z_ptr + kk * stride_xk).to(tl.float32)
@@ -462,7 +464,15 @@ _BY_SHAPE_M16 = {
     # The _BY_SHAPE gate_up tile loses 12% at M=16; the qkvz tile below loses 1% at M=4.
     (1, False, 1280, 2560): (16, 64, 10, True, None, 4, 3),  # shared gate_up, 1.03x
     (1, False, 16384, 2560): (64, 128, 1, True, None, 4, 3),  # GDN in_proj_qkvz, 1.04x
-    (1, False, 2560, 640): (32, 128, 1, True, None, 4, 4),  # shared-expert down (W16 server 4.1->3.8us)
+    (1, False, 2560, 640): (
+        32,
+        128,
+        1,
+        True,
+        None,
+        4,
+        4,
+    ),  # shared-expert down (W16 server 4.1->3.8us)
     # attention qkv at M=16: both the wide (128,256,8w) tile and the (64,128) qkvz tile
     # measured 27.5us in the server vs 25.6us for the narrow single-split tile; pin it.
     (1, False, 13312, 2560): (32, 128, 1, True, None, 4, 3),
@@ -481,9 +491,7 @@ _BY_SHAPE_M1 = {
 
 def _expand(table, buckets):
     return {
-        (wb, cn, m, N, K): cfg
-        for (wb, cn, N, K), cfg in table.items()
-        for m in buckets
+        (wb, cn, m, N, K): cfg for (wb, cn, N, K), cfg in table.items() for m in buckets
     }
 
 

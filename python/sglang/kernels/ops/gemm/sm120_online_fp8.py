@@ -188,9 +188,7 @@ def _ingest_rowwise_weight(
     linear.weight = new_parameter
 
 
-def attach_rowwise_ingest(
-    linears, *, target_device: torch.device | None = None
-) -> int:
+def attach_rowwise_ingest(linears, *, target_device: torch.device | None = None) -> int:
     """Attach an all-or-nothing loader to meta-born BF16 linear weights."""
     checked = []
     for linear in linears:

@@ -7,6 +7,8 @@ import math
 import pytest
 import torch
 import torch.nn.functional as F
+from torch import nn
+
 from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     configure_online_fp8,
     dequantize_rowwise_weight,
@@ -16,7 +18,6 @@ from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     w8a16_gemv_supported,
 )
 from sglang.test.ci.ci_register import register_cuda_ci
-from torch import nn
 
 register_cuda_ci(est_time=180, stage="base-b", runner_config="1-gpu-small")
 
@@ -335,9 +336,7 @@ def test_rowwise_tuned_head_shape_matches_reference_and_replays(
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        graph_output = rowwise_fp8_lm_head_logits(
-            hidden, rowwise_draft_head_weight
-        )
+        graph_output = rowwise_fp8_lm_head_logits(hidden, rowwise_draft_head_weight)
     hidden.copy_(_randn((rows, HIDDEN_SIZE), seed=900 + rows, scale=0.25))
     graph.replay()
     torch.cuda.synchronize()

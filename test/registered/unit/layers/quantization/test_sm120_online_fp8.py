@@ -2,6 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
+
+from sglang.kernels.ops.gemm import sm120_online_fp8
 from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     attach_rowwise_ingest,
     configure_online_fp8,
@@ -12,9 +15,7 @@ from sglang.kernels.ops.gemm.sm120_online_fp8 import (
     rowwise_scale_of,
     select_rowwise_weight_rows,
 )
-from sglang.kernels.ops.gemm import sm120_online_fp8
 from sglang.test.ci.ci_register import register_cpu_ci
-from torch import nn
 
 register_cpu_ci(est_time=10, suite="base-a-test-cpu")
 
