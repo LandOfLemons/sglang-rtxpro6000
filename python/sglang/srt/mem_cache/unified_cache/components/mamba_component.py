@@ -83,7 +83,8 @@ class MambaComponent(TreeComponent):
         self._mamba_pool_host = None  # set to host mamba pool when HiCache enabled
         self._resume_leases: dict[str, dict[int, bool]] = {}
         self._resume_pins: dict[str, dict[str, int]] = {}
-        self._pending_resume_backup: dict[int, str] = {}
+        # node id -> (session id, session generation) waiting for a durable host backup
+        self._pending_resume_backup: dict[int, tuple[str, int]] = {}
 
     def needs_incremental_backup(self, node: UnifiedTreeNode) -> bool:
         data = node.component_data[self.component_type]
@@ -160,15 +161,14 @@ class MambaComponent(TreeComponent):
         self._release_resume_leases(session_id)
         return indexed
 
-    def _session_id_of(self, req: Optional[Req]) -> Optional[str]:
-        if req is None:
+    def _resume_tracker(self):
+        return getattr(self.cache, "session_refs", None)
+
+    def _pin_session_id(self, req: Optional[Req]) -> Optional[str]:
+        tracker = self._resume_tracker()
+        if tracker is None or req is None:
             return None
-        session_id = req.session_id
-        if session_id is None and req.session is not None:
-            session_id = req.session.session_id
-        if not session_id:
-            return None
-        return session_id
+        return tracker.current_pin_session_id(req)
 
     def _try_node(self, node_id: int) -> Optional[UnifiedTreeNode]:
         try:
@@ -311,7 +311,7 @@ class MambaComponent(TreeComponent):
         insert_result: Optional[InsertResult],
     ) -> None:
         """Pin the newest durable host checkpoint. Do not move the match pin."""
-        session_id = self._session_id_of(req)
+        session_id = self._pin_session_id(req)
         if session_id is None or insert_result is None:
             return
         node_ref = insert_result.last_device_node
@@ -330,7 +330,7 @@ class MambaComponent(TreeComponent):
             self._pending_resume_backup.pop(node.id, None)
             self._pin_resume(session_id, node, "commit")
             return
-        self._pending_resume_backup[node.id] = session_id
+        self._pending_resume_backup[node.id] = (session_id, req.session_generation)
 
     def _release_resume_leases(self, session_id: str) -> None:
         self._resume_pins.pop(session_id, None)
@@ -346,7 +346,7 @@ class MambaComponent(TreeComponent):
         self._pending_resume_backup = {
             node_id: owner
             for node_id, owner in self._pending_resume_backup.items()
-            if owner != session_id
+            if owner[0] != session_id
         }
 
     def _node_is_ancestor(
@@ -472,7 +472,8 @@ class MambaComponent(TreeComponent):
                     pins.pop(name, None)
             if not pins:
                 self._resume_pins.pop(session_id, None)
-        if self._pending_resume_backup.get(node.id) == session_id:
+        pending = self._pending_resume_backup.get(node.id)
+        if pending is not None and pending[0] == session_id:
             self._pending_resume_backup.pop(node.id, None)
         self._host_unlock_resume(session_id, node, "released")
 
@@ -627,7 +628,7 @@ class MambaComponent(TreeComponent):
                 mamba_host_hit_length=max(result.mamba_host_hit_length, 1)
             )
 
-        session_id = self._session_id_of(params.req)
+        session_id = self._pin_session_id(params.req)
         if session_id is not None and last_node is not None:
             self._pin_resume(session_id, last_node, "match")
 
@@ -1284,7 +1285,12 @@ class MambaComponent(TreeComponent):
                     cd.host_value = transfers[0].host_indices.clone()
                 pending = self._pending_resume_backup.pop(node.id, None)
                 if pending is not None and cd.host_value is not None:
-                    self._pin_resume(pending, node, "commit")
+                    session_id, generation = pending
+                    tracker = self._resume_tracker()
+                    if tracker is not None and tracker.pin_still_current(
+                        session_id, generation
+                    ):
+                        self._pin_resume(session_id, node, "commit")
 
         elif phase == CacheTransferPhase.LOAD_BACK:
             if not transfers:
