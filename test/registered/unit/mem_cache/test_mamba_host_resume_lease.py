@@ -567,6 +567,72 @@ class ResumeLeaseTests(unittest.TestCase):
         self.assertEqual(node.component_data[MAMBA].host_lock_ref, 2)
         self.assertNotIn(node.id, self.comp._pending_resume_backup)
 
+    def test_fork_retires_its_leaf_registration_under_another_owners_pin(self):
+        """Leaf coverage is abandoned ownership too, not eviction bookkeeping."""
+        first = self._open("s")
+        s_req = self._req("s", first)
+        second = self._open("b")
+        b_req = self._req("b", second)
+        common = self._add(_node(1, self.root, tokens=[5]))
+        old = self._add(_node(2, common, tokens=[10, 11, 12]))
+        common.children = {2: old}
+        self._finish(s_req, old)
+        self._finish(b_req, old)
+        cd = old.component_data[MAMBA]
+        self.assertEqual(cd.session_ids, {"s", "b"})
+        self.assertEqual(cd.session_ref, 2)
+        self.assertEqual(cd.host_lock_ref, 2)
+
+        branch = self._add(_node(3, common, tokens=[20]))
+        common.children = {2: old, 3: branch}
+        self._finish(s_req, branch)
+
+        # The host drop stops at b's pin, but s has no claim left on old: it
+        # keeps the host copy for b and stays in b's session partition only.
+        self.assertEqual(
+            self.comp._resume_pins,
+            {"s": {"commit": branch.id}, "b": {"commit": old.id}},
+        )
+        self.assertEqual(self.comp._session_leaves["s"], {branch})
+        self.assertEqual(cd.session_ids, {"b"})
+        self.assertEqual(cd.session_ref, 1)
+        self.assertEqual(cd.host_lock_ref, 1)
+        self.assertEqual(cd.host_value, [1])
+        self.assertEqual(self.freed, [])
+
+        # Once the surviving owner closes, nothing resumes old any more and the
+        # host copy is reclaimed while the current branch keeps its pin.
+        self.tracker.release_radix_session("b")
+        self.assertIsNone(cd.session_ids)
+        self.assertEqual(cd.session_ref, 0)
+        self.assertEqual(cd.host_lock_ref, 0)
+        self.assertIsNone(cd.host_value)
+        self.assertEqual(self.freed, [old.id])
+        self.assertEqual(self.comp._resume_pins, {"s": {"commit": branch.id}})
+        self.assertEqual(branch.component_data[MAMBA].host_lock_ref, 1)
+
+    def test_fork_retires_its_leaf_registration_behind_an_ordinary_lock(self):
+        generation = self._open()
+        req = self._req("s", generation)
+        common = self._add(_node(1, self.root, tokens=[5]))
+        old = self._add(_node(2, common, tokens=[10, 11, 12]))
+        old.component_data[MAMBA].lock_ref = 1
+        common.children = {2: old}
+        self._finish(req, old)
+
+        branch = self._add(_node(3, common, tokens=[20]))
+        common.children = {2: old, 3: branch}
+        self._finish(req, branch)
+
+        cd = old.component_data[MAMBA]
+        self.assertEqual(self.comp._resume_pins, {"s": {"commit": branch.id}})
+        self.assertEqual(self.comp._session_leaves["s"], {branch})
+        self.assertIsNone(cd.session_ids)
+        self.assertEqual(cd.session_ref, 0)
+        # An ordinary lock keeps the host data, it does not keep the marker.
+        self.assertEqual(cd.host_value, [1])
+        self.assertEqual(self.freed, [])
+
 
 if __name__ == "__main__":
     unittest.main()

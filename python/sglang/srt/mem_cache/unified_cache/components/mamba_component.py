@@ -582,19 +582,20 @@ class MambaComponent(TreeComponent):
     ) -> None:
         if stop is None or leaf is stop:
             return
-        # Retire this session's pins, host leases and pending backup ownership
-        # across the whole abandoned branch first, whatever the host drop can
-        # reach. Another owner's pin keeps the shared host data alive; it does
-        # not keep this session's obsolete pin or its late backup callback.
+        # Retire this session's pins, host leases, pending backup ownership and
+        # leaf registration across the whole abandoned branch first, whatever
+        # the host drop can reach. Another owner's pin or an ordinary lock keeps
+        # the shared host data alive; it does not keep this session's obsolete
+        # pin, its late backup callback or its marker in the session partition.
         for node in self._abandoned_chain(leaf, stop):
             self._release_own_pin(session_id, node)
+        self._clear_session_leaf(session_id, leaf)
         path = self._tail_below(leaf, stop, session_id)
         if not path:
             return
         nodes = list(path)
         if path[0] is leaf:
             nodes.extend(self._descendants_until_block(leaf, session_id))
-        self._clear_session_leaf(session_id, leaf)
         dropped = self._tombstone_mamba_host(session_id, nodes)
         if not dropped:
             return
