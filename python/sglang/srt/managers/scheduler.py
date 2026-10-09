@@ -110,6 +110,7 @@ from sglang.srt.lora.lora_overlap_loader import LoRAOverlapLoader
 from sglang.srt.managers.disagg_service import maybe_create_ascend_config_store
 from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
 from sglang.srt.managers.io_struct import (
+    MMInputsProcessError,
     AbortReq,
     ActiveRanksOutput,
     AddExternalCorpusReqInput,
@@ -345,6 +346,10 @@ else:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _MultimodalInputProcessingError(RuntimeError):
+    """A rank could not build MultimodalInputs for a request (features lost in transport)."""
 
 
 def _prewarm_hccl_group(device, group, device_module):
@@ -1975,7 +1980,7 @@ class Scheduler(
 
         for tokenized_req in tokenized_reqs:
             if tokenized_req.mm_inputs is not None and not isinstance(
-                tokenized_req.mm_inputs, MultimodalInputs
+                tokenized_req.mm_inputs, (MultimodalInputs, MMInputsProcessError)
             ):
                 tokenized_req.mm_inputs = MultimodalInputs.from_processor_output(
                     tokenized_req.mm_inputs
@@ -2346,6 +2351,8 @@ class Scheduler(
         return image_inputs
 
     def _get_multimodal_inputs(self, mm_inputs):
+        if isinstance(mm_inputs, MMInputsProcessError):
+            raise _MultimodalInputProcessingError(mm_inputs.message)
         if isinstance(mm_inputs, MultimodalInputs):
             return mm_inputs
 
@@ -2632,7 +2639,18 @@ class Scheduler(
 
         # Handle multimodal inputs
         if recv_req.mm_inputs is not None:
-            image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            try:
+                image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            except _MultimodalInputProcessingError as error:
+                # A transport fault, not a bad request: 500 so clients may retry.
+                req.set_finish_with_abort(
+                    str(error),
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    err_type="InternalServerError",
+                )
+                self.init_req_max_new_tokens(req)
+                self._add_request_to_queue(req)
+                return
 
             SessionController.adjust_mm_offsets(recv_req, req, image_inputs)
 
@@ -2951,7 +2969,17 @@ class Scheduler(
 
         # Handle multimodal inputs
         if recv_req.mm_inputs is not None:
-            image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            try:
+                image_inputs = self._get_multimodal_inputs(recv_req.mm_inputs)
+            except _MultimodalInputProcessingError as error:
+                # A transport fault, not a bad request: 500 so clients may retry.
+                req.set_finish_with_abort(
+                    str(error),
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    err_type="InternalServerError",
+                )
+                self._add_request_to_queue(req)
+                return
             # Expand a single image token into multiple dummy tokens for receiving image embeddings
             # The `pad_input_ids_func` is model-specific and may be None for
             # embedding models or models not requiring special padding.
