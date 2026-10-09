@@ -15,7 +15,9 @@ native installation.
 ## Prerequisites
 
 Use Linux with an RTX PRO 6000 Blackwell (SM120), a working NVIDIA driver,
-Git, `uv`, CUDA 13.3, GCC/G++ 15 and Rust. These instructions install SGLang,
+Git, `uv`, CUDA 13.3, GCC/G++ 15, Rust and Ninja. The FlashInfer packaging step
+below runs Ninja from the build environment, so the bootstrap line of the fresh
+sequence installs it. These instructions install SGLang,
 not the driver or operating-system toolchain. The
 [tested versions](#qualified-environment) are listed below.
 
@@ -37,18 +39,28 @@ uv python install 3.12.13
 uv venv --python 3.12.13 .venv
 source .venv/bin/activate
 uv pip install pip "setuptools>=61.0" "setuptools-rust>=1.10" \
-  "setuptools-scm>=8.0" wheel build
+  "setuptools-scm>=8.0" wheel build ninja
 
 source scripts/pennyroyal/build-env.sh
 
 uv pip install --prerelease=allow --index-strategy unsafe-best-match \
   --extra-index-url https://docs.sglang.ai/whl/cu130/ \
   --no-build-isolation -e python
+
+.venv/bin/python scripts/pennyroyal/flashinfer/install.py
 ```
 
 The `setup1` tag includes the WSL2 configurator update and the same v2.5.3
 runtime. SGLang is installed as an editable package from this checkout. Keep the
 checkout in place while using this environment.
+
+The last command packages the accepted FlashInfer SM120 source into the
+FlashInfer installation of that same environment and compiles the fused-MoE
+module from it; see
+[FlashInfer SM120 source integration](#flashinfer-sm120-source-integration).
+It compiles once per environment, needs the CUDA 13.3 compiler and Ninja, and
+uses the shared job budget below. Users of the prebuilt image run nothing; the
+image already contains the compiled module.
 
 Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
 [download your checkpoints](#reference-and-measured-checkpoints), then follow
@@ -73,12 +85,31 @@ source .venv/bin/activate
 source scripts/pennyroyal/build-env.sh
 
 uv pip install --no-build-isolation --no-deps -e python
+
+.venv/bin/python scripts/pennyroyal/flashinfer/install.py
 ```
 
-This updates SGLang without re-resolving the existing dependencies.
-v2.5.3 reuses the v2.5.0 PyTorch, `sglang-kernel`, FlashInfer, and NIXL
-dependencies. If build tools are missing, install the bootstrap packages from
-the fresh-install sequence, then retry the final command.
+This updates SGLang without re-resolving the existing dependencies: v2.5.3
+keeps the v2.5.0 PyTorch, `sglang-kernel` and NIXL packages. FlashInfer is the
+one dependency this source does change, and `--no-deps` will not install it for
+you. This source pins `flashinfer-python[cu13]==0.7.0.post1`, which is the
+version the accepted SM120 source patches apply to; environments from v2.5.0 up
+to the `pennyroyal-v2.5.3-setup1` tag have 0.6.17. The FlashInfer step is not
+covered by the dependency reuse either: `--no-deps` leaves the *package* alone,
+but the accepted source has to be present inside it. The step is safe to repeat,
+and rerunning it after any FlashInfer install or upgrade is what keeps the
+environment packaged rather than stock.
+
+The step stops with the version it found if your FlashInfer is not the accepted
+pin. Install the pinned distribution, which re-resolves FlashInfer and its own
+extra and nothing else, then rerun the step:
+
+```bash
+uv pip install --prerelease=allow --index-strategy unsafe-best-match \
+  --extra-index-url https://docs.sglang.ai/whl/cu130/ \
+  'flashinfer-python[cu13]==0.7.0.post1'
+.venv/bin/python scripts/pennyroyal/flashinfer/install.py
+```
 
 If you use NVMe PLE, also refresh the [isolated reader](#optional-nvme-ple-reader)
 for the new source version. The prepared PLE overlay can be reused.
@@ -206,7 +237,13 @@ for name in ("sglang", "torch", "flashinfer-python", "nixl-cu13"):
 PY
 nvcc --version
 gcc-15 --version
+.venv/bin/python scripts/pennyroyal/flashinfer/install.py --check
 ```
+
+The last command prints the accepted source commits and the installed SM120
+module path, size and SHA-256. It fails on a stock FlashInfer source tree, on an
+unexpected FlashInfer version, and on an environment where the module was never
+built.
 
 Then start a real profile with [RUN.md](RUN.md). Confirm the resolved backends,
 KV dtypes, state pools, and CUDA graphs before measuring. `/health` verifies the
@@ -228,7 +265,7 @@ are recorded in [CHANGES.md](CHANGES.md).
 | CUDA / NVCC | `13.3` / `13.3.73` |
 | GCC / Rust | `15.3.1` / `1.97.1` |
 | PyTorch | `2.13.0+cu130` |
-| FlashInfer | `0.6.17` |
+| FlashInfer | `0.7.0.post1`, plus the accepted SM120 source below |
 | NIXL | `1.4.0` |
 | `sglang-kernel` | `0.4.6.post1` |
 | Triton / XGrammar | `3.7.1` / `0.2.1` |
@@ -268,6 +305,44 @@ The fresh output directory avoids accidentally selecting an older wheel in
 `python/dist`. The generated package version depends on the checked-out Git
 revision. Model weights and separately installed runtime dependencies are not
 bundled in this wheel.
+
+<a id="flashinfer-sm120-source-integration"></a>
+
+### FlashInfer SM120 source integration
+
+`scripts/pennyroyal/flashinfer/install.py` is the one packaging step behind both
+sequences above and the container image build. It takes the released
+`flashinfer_python-0.7.0.post1` wheel sources, applies two already accepted
+patches, and builds the SM120 CUTLASS fused-MoE module from the result:
+
+| Input | Contents | Attribution |
+|---|---|---|
+| `patches/moe-source.patch` | Three commits through `2a4d8d3a9501bf3b3fe3b78d7c6bad38bfc76064`; two C++ headers | Penny `<Pennyroyal@agentmail.to>`, port of the `aiueo52/flash-next-rtxpro6000` donor patches at `524af49abcca` and `e0fa9fa9fc3c` |
+| `patches/gdn-source.patch` | `0b0ba4c2b18173303b46dd8ec381735e1615b313`; four Python files | aa24aa `<2496788660@qq.com>`, upstream FlashInfer #6227 |
+
+The mailboxes are kept byte-for-byte; only their install path is adapted. The
+MoE mailbox names the `csrc/` tree of the FlashInfer source repository, which
+the wheel ships as `flashinfer/data/csrc`, and the GDN mailbox names the
+importable `flashinfer/` package. Both apply cleanly to stock 0.7.0.post1
+sources (FlashInfer base `946200de1ae94fc93fdd0926f0a13afd1fa7f0f1`, wheel
+`flashinfer_python-0.7.0.post1-py3-none-any.whl`, SHA-256
+`c7adf826568d61fc1b7d3aadd4cae387a35a138bfc08e2deca2f34ecfa280716`).
+`accepted-sources.json` records the digest of every file before and after the
+patch, which is how the step tells stock, accepted and unexpected source apart
+and why a repeat run is a no-op instead of a double patch. The module is
+compiled with `FLASHINFER_CUDA_ARCH_LIST=12.0f` -- `TORCH_CUDA_ARCH_LIST` alone
+is ignored here -- through the JIT spec's own Ninja build, and installed at
+`flashinfer/data/aot/fused_moe_120/fused_moe_120.so` inside the package, the
+first place FlashInfer looks. The stock provider wheels can stay for the other
+kernels; the loader prefers the package-local module. No kernel source is
+redesigned, and no host binary or private overlay is copied into the image.
+
+The MoE changes are the accepted fused-routing prologue and the two folded
+finalize/expansion passes, with `FLASHINFER_MOE_FUSED_PROLOGUE=0` as their
+kill switch. The GDN change is opt-in: the FP16-accumulate MMA mode of the
+patched SM12x prefill kernels is enabled by the two Next launch recipes and the
+two Next startup scripts through `FLASHINFER_GDN_FP16_ACCUM_MMA=1`, which does
+not change FlashInfer's own default, the online-FP8 choice or the 27B profile.
 
 ### Source and earlier wheels
 

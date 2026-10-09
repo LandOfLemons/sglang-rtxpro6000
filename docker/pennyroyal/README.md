@@ -7,10 +7,13 @@ and [`RUN.md`](../../RUN.md).
 
 The release image is named
 `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. It includes Python, the CUDA
-toolchain, NIXL POSIX, and prebuilt FlashInfer kernels. The host supplies the
-NVIDIA driver and model files. Follow the setup below; Compose will pull the
-image when you start it. Release images become available after the build
-and CPU installation checks pass.
+toolchain, NIXL POSIX, and the FlashInfer SM120 fused-MoE kernel built from the
+accepted source in this repository. Nothing has to be compiled, configured or
+overlaid on the host: start the container and the recipe loads the module that
+is already inside the image. The host supplies the NVIDIA driver and model
+files. Follow the setup below; Compose will pull the image when you start it.
+Release images become available after the build and CPU installation checks
+pass.
 
 ## Prerequisites
 
@@ -200,6 +203,11 @@ docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --help
 docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --check
 ```
 
+`--check` also reports the accepted FlashInfer source and the SHA-256 of the
+package-local SM120 module it loads; a stock FlashInfer install, or one where
+the prebuilt provider kernel was simply copied into place, fails it. See
+[FlashInfer SM120 source integration](../../BUILD.md#flashinfer-sm120-source-integration).
+
 To run another command inside the image, use `exec`:
 
 ```bash
@@ -226,7 +234,10 @@ docker compose up -d --force-recreate
 ```
 
 Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
-`SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default.
+`SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default. The
+Next startup files run the patched FlashInfer GDN prefill kernels in
+FP16-accumulate MMA mode; change the exported value to `0` in the startup file,
+or add `FLASHINFER_GDN_FP16_ACCUM_MMA: "0"` to a Compose override, to opt out.
 
 ### WSL2
 
@@ -366,8 +377,9 @@ produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. Draft releases and ordina
 branch pushes do not publish a release image. No moving `latest` tag is used.
 
 The build checks package versions, the source revision and import location,
-launcher syntax, the entrypoint and the NIXL POSIX plugin without a GPU. A
-failed check fails the workflow and leaves the version tag unchanged.
+launcher syntax, the entrypoint, the accepted FlashInfer SM120 source and
+installed module, and the NIXL POSIX plugin without a GPU. A failed check fails
+the workflow and leaves the version tag unchanged.
 
 For a failed build, rerun the **Pennyroyal container** workflow in Actions.
 Alternatively, run it manually against the release's Git tag with both inputs

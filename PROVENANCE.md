@@ -40,6 +40,30 @@ no change to the released graph implementation. Dependencies and launch
 settings are unchanged. [CHANGES.md](CHANGES.md) records the focused
 two-profile regression scope; existing performance results are not refreshed.
 
+## FlashInfer SM120 accepted source
+
+Pennyroyal ships two already accepted FlashInfer source changes, packaged into
+the installed FlashInfer of every native environment and into the release image
+by `scripts/pennyroyal/flashinfer/install.py`:
+
+| Item | Value |
+|---|---|
+| Pinned distribution | `flashinfer_python[cu13]==0.7.0.post1`, wheel SHA-256 `c7adf826568d61fc1b7d3aadd4cae387a35a138bfc08e2deca2f34ecfa280716` |
+| FlashInfer preimage | upstream base `946200de1ae94fc93fdd0926f0a13afd1fa7f0f1` |
+| Carried mailboxes | `scripts/pennyroyal/flashinfer/patches/moe-source.patch`, `patches/gdn-source.patch` (git-format-patch, production files only) |
+| MoE commits | `5e86c489f5759cb4006d3b1b5e7bdd14f7a581df`, `b9fa8893102dc3bbcec92762230e7f1678644a4e`, `2a4d8d3a9501bf3b3fe3b78d7c6bad38bfc76064` — Penny `<Pennyroyal@agentmail.to>`, port of `aiueo52/flash-next-rtxpro6000` at `524af49abcca66fcb4377ba8297022804535fccf` and `e0fa9fa9fc3ccd710a8fb3d2639b85ce62188c23` |
+| GDN commit | `0b0ba4c2b18173303b46dd8ec381735e1615b313` — aa24aa `<2496788660@qq.com>`, cherry picked from `c0771c79b7e2f2bc0edf4fdcb7c43b986a56707a`, upstream FlashInfer #6227 |
+| Built module | `flashinfer/data/aot/fused_moe_120/fused_moe_120.so`, compiled with `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
+| Profile default | the two Next recipes and the two Next startup files export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`; FlashInfer's own default and the 27B profile are unchanged |
+
+`accepted-sources.json` records the SHA-256 of every affected file before and
+after the patch, which is what the step and the image check compare against; it
+is regenerated from a fresh extraction of the pinned wheel with `--record`. No
+kernel source is redesigned here, no stride fusion or active-expert packing is
+added, and no host binary or private overlay is shipped. Compilation, image and
+GPU qualification of the resulting module belong to the release host and are
+recorded with the release that carries them.
+
 ## v2.5.3 source provenance
 
 Runtime source `69583da7c71b87ac36371333a19f2749bab72773` extends public source
