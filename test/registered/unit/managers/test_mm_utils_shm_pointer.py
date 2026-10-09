@@ -29,6 +29,7 @@ from sglang.srt.managers.io_struct import (
     TokenizedGenerateReqInput,
 )
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, MultimodalInputs
+from sglang.srt.multimodal.transport.cuda_ipc import CudaIpcTensorTransportProxy
 from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.session.session_controller import Session
@@ -243,6 +244,82 @@ class TestMarkerConsumers(CustomTestCase):
             self.assertIn("lost segment", fin.message)
             # coordinates survive so nothing downstream sees a None address
             self.assertEqual((out.bootstrap_host, out.bootstrap_port, out.bootstrap_room), ("10.0.0.7", 8998, 4242))
+
+
+class _FakePoolProxy(CudaIpcTensorTransportProxy):
+    """A CUDA pool slice without CUDA: records acknowledgements, forbids reconstruction."""
+
+    def __init__(self):  # noqa: D401 - bypass the real constructor (needs tensors + a pool)
+        self._consumer_acknowledged = False
+        self.acks = []
+
+    def acknowledge_consumption(self, consumer_count=1, consumer_rank=None):
+        if self._consumer_acknowledged:
+            return
+        self.acks.append(consumer_count)
+        self._consumer_acknowledged = True
+
+    def reconstruct_on_target_device(self, *args, **kwargs):
+        raise AssertionError("a rejected request must not reconstruct its features")
+
+
+class _FakePackedView(_FakePoolProxy):
+    """One typed view of a packed VMM transfer: acknowledges only through its owner."""
+
+    def __init__(self, owner):
+        super().__init__()
+        self._packed_owner = owner
+
+    def acknowledge_consumption(self, consumer_count=None):
+        raise RuntimeError("Packed CUDA VMM features must be reconstructed before release")
+
+
+class TestMixedTransportRejection(CustomTestCase):
+    """A request can carry one image as a CUDA VMM/IPC pool slice and another as the
+    CPU->SHM fallback. Rejecting it must release both: the SHM segment is
+    unlinked and the GPU lease is acknowledged for this rank exactly once,
+    without reconstructing anything and without double-releasing on a repeat."""
+
+    def test_mixed_shm_and_vmm_rejection_releases_gpu_lease_exactly_once(self):
+        vmm = _FakePoolProxy()
+        owner = _FakePoolProxy()
+        view_a, view_b = _FakePackedView(owner), _FakePackedView(owner)
+        shm = ShmPointerMMData(torch.zeros(4))
+        items = [
+            MultimodalDataItem(modality=Modality.IMAGE, offsets=[(0, 2)], feature=vmm),
+            MultimodalDataItem(
+                modality=Modality.IMAGE,
+                offsets=[(2, 4)],
+                feature=view_a,
+                model_specific_data={"image_grid_thw": view_b},
+            ),
+            MultimodalDataItem(modality=Modality.IMAGE, offsets=[(4, 6)], feature=shm),
+        ]
+        req = _tokenized_req(mm_inputs=MultimodalInputs(mm_items=items))
+        # the SHM segment is gone: the real rejection precondition
+        shared_memory.SharedMemory(name=shm.shm_name).unlink()
+
+        discard_shm_features(req)
+
+        self.assertEqual(vmm.acks, [1])  # this rank's slot, once
+        self.assertEqual(owner.acks, [1])  # one packed transfer, two views -> one release
+        self.assertEqual(view_a.acks, [])
+        self.assertEqual(view_b.acks, [])
+        self.assertFalse(_segment_exists(shm.shm_name))
+        # idempotent: a second discard (e.g. the consensus loop) releases nothing twice
+        discard_shm_features(req)
+        self.assertEqual(vmm.acks, [1])
+        self.assertEqual(owner.acks, [1])
+        # the marker still goes on afterwards, as the receiver does
+        req.mm_inputs = MMInputsProcessError(message="lost segment")
+        self.assertFalse(has_shm_features([req]))
+
+    def test_release_skips_already_acknowledged_slices(self):
+        proxy = _FakePoolProxy()
+        proxy.acknowledge_consumption(1)
+        item = MultimodalDataItem(modality=Modality.IMAGE, offsets=[(0, 1)], feature=proxy)
+        self.assertEqual(item.release_transport_proxies(), 0)
+        self.assertEqual(proxy.acks, [1])
 
 
 if __name__ == "__main__":

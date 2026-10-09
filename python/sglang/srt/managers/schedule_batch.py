@@ -494,6 +494,40 @@ class MultimodalDataItem(msgspec.Struct, kw_only=True, dict=True, array_like=Tru
             )
         )
 
+    def _transport_proxies(self):
+        """Every CUDA IPC/VMM pool proxy this item still holds, field by field."""
+        for value in (self.feature, self.precomputed_embeddings):
+            if isinstance(value, CudaIpcTensorTransportProxy):
+                yield value
+        for value in self.model_specific_data.values():
+            if isinstance(value, CudaIpcTensorTransportProxy):
+                yield value
+
+    def release_transport_proxies(self) -> int:
+        """Acknowledge every pool slice this item holds without reconstructing it.
+
+        Used when the request is rejected before any rank consumes it (its
+        shared-memory features were lost in transport). Mirrors the normal
+        per-rank rule of ``reconstruct()``: this rank releases its own consumer
+        slot (consumer_count=1); the producer's recycler counts the whole TP
+        group and frees the slice once every rank has acknowledged. A packed
+        VMM transfer is one slice shared by several typed views, so it is
+        acknowledged through its owner exactly once. Returns the number of
+        slices released; already-acknowledged slices are skipped.
+        """
+        released = 0
+        seen = set()
+        for proxy in self._transport_proxies():
+            target = getattr(proxy, "_packed_owner", None) or proxy
+            if id(target) in seen:
+                continue
+            seen.add(id(target))
+            if getattr(target, "_consumer_acknowledged", False):
+                continue
+            target.acknowledge_consumption(1)
+            released += 1
+        return released
+
     def acknowledge_deferred_cuda_ipc_feature(self, consumer_count: int = 1):
         """Release a lazy IPC feature when an embedding-cache hit skips ViT."""
         if isinstance(self.feature, CudaIpcTensorTransportProxy):

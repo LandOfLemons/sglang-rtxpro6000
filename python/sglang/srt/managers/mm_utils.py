@@ -1530,7 +1530,16 @@ def _discard_tensor_or_list(value) -> None:
 
 
 def discard_shm_features(obj) -> None:
-    """Release SHM features that will not be consumed by this request."""
+    """Release every feature transport of a request that will not be consumed.
+
+    Called on each rank for a request the receiver rejects (a shared-memory
+    feature segment was gone). A request can mix transports: one image as a
+    CUDA VMM/IPC pool slice, another as the CPU->SHM fallback when the pool
+    could not fit every field. SHM handles are closed and unlinked; pool
+    slices are acknowledged for this rank so the producer's recycler can free
+    them (otherwise repeated rejections would strand pool capacity). The
+    caller replaces mm_inputs with the error marker afterwards.
+    """
     if isinstance(obj, BaseBatchReq):
         for sub_obj in obj.batch:
             discard_shm_features(sub_obj)
@@ -1538,6 +1547,13 @@ def discard_shm_features(obj) -> None:
     for item in _mm_items_of(obj) or ():
         _discard_tensor_or_list(item.feature)
         _discard_tensor_or_list(item.precomputed_embeddings)
+        try:
+            item.release_transport_proxies()
+        except Exception:
+            logger.exception(
+                "Failed to release a CUDA feature-pool slice of a rejected request (rid=%s)",
+                getattr(obj, "rid", None),
+            )
 
 
 def _unwrap_tensor_or_list(value):
