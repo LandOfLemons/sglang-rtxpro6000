@@ -2450,6 +2450,9 @@ class Scheduler(
         marker = recv_req.mm_inputs
         if not isinstance(marker, MMInputsProcessError):
             return False
+        # Keep the bootstrap coordinates and the disaggregation mode: the Req's
+        # time stats and any later bookkeeping are shaped by them, and dropping
+        # them is what made the decode prealloc queue dereference None.
         req = Req(
             recv_req.rid,
             recv_req.input_text,
@@ -2457,16 +2460,31 @@ class Scheduler(
             recv_req.sampling_params,
             vocab_size=self.model_config.vocab_size,
             http_worker_ipc=recv_req.http_worker_ipc,
+            bootstrap_host=getattr(recv_req, "bootstrap_host", None),
+            bootstrap_port=getattr(recv_req, "bootstrap_port", None),
+            bootstrap_room=getattr(recv_req, "bootstrap_room", None),
+            disagg_mode=self.disaggregation_mode,
         )
         req.tokenizer = self.tokenizer
-        req.set_finish_with_abort(
-            marker.message,
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            err_type="InternalServerError",
-        )
-        if generate:
-            self.init_req_max_new_tokens(req)
-        self._add_request_to_queue(req)
+        if self.disaggregation_mode == DisaggregationMode.NULL:
+            # Unified serving: the waiting queue finishes an aborted request on
+            # the next scheduler step, like every other early rejection here.
+            req.set_finish_with_abort(
+                marker.message,
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                err_type="InternalServerError",
+            )
+            if generate:
+                self.init_req_max_new_tokens(req)
+            self._add_request_to_queue(req)
+            return True
+        # Disaggregated prefill/decode worker: the bootstrap and prealloc queues
+        # would start a KV transfer for a request that has no features and no
+        # future, so answer directly instead (the same direct path the session
+        # validation errors above use). One error response, no queue entry.
+        prepare_abort(req, marker.message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+        req.finished_reason.err_type = "InternalServerError"
+        self.output_streamer.stream_output([req], req.return_logprob)
         return True
 
     def handle_generate_request(

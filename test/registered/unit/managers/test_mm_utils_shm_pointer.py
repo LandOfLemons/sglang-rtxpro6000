@@ -22,6 +22,7 @@ from unittest import mock
 import msgspec
 import torch
 
+from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.managers.io_struct import (
     BatchTokenizedGenerateReqInput,
     MMInputsProcessError,
@@ -165,6 +166,7 @@ class TestMarkerConsumers(CustomTestCase):
         stub = SimpleNamespace(
             model_config=SimpleNamespace(vocab_size=32),
             tokenizer=None,
+            disaggregation_mode=DisaggregationMode.NULL,
             session_controller=_Sessions(),
             init_req_max_new_tokens=lambda req: None,
             _add_request_to_queue=lambda req, is_retracted=False: queued.append(req),
@@ -188,6 +190,59 @@ class TestMarkerConsumers(CustomTestCase):
         self.assertFalse(
             Scheduler._reject_mm_transport_failure(stub, _tokenized_req(input_ids=[1, 2], mm_inputs=None))
         )
+
+    def _stub_scheduler(self, mode, queued, streamed, touched):
+        class _Sessions:  # any session lookup would be a bug
+            def __contains__(self, key):
+                touched.append(("session", key))
+                return False
+
+        class _Queue:  # any disaggregation queue entry would be a bug
+            def add(self, *a, **kw):
+                touched.append(("queue", mode))
+                raise AssertionError("aborted request reached a disaggregation queue")
+
+        return SimpleNamespace(
+            model_config=SimpleNamespace(vocab_size=32),
+            tokenizer=None,
+            disaggregation_mode=mode,
+            session_controller=_Sessions(),
+            disagg_prefill_bootstrap_queue=_Queue(),
+            disagg_decode_prealloc_queue=_Queue(),
+            init_req_max_new_tokens=lambda req: None,
+            _add_request_to_queue=lambda req, is_retracted=False: queued.append(req),
+            output_streamer=SimpleNamespace(
+                stream_output=lambda reqs, return_logprob, skip_req=None: streamed.append(list(reqs))
+            ),
+        )
+
+    def test_scheduler_rejects_marker_on_disaggregated_workers(self):
+        """PREFILL/DECODE workers answer the error directly: no bootstrap, no prealloc."""
+        for mode in (DisaggregationMode.PREFILL, DisaggregationMode.DECODE):
+            queued, streamed, touched = [], [], []
+            stub = self._stub_scheduler(mode, queued, streamed, touched)
+            req = self._marker_req(
+                session_params=SimpleNamespace(id="s1"),
+                sampling_params=SamplingParams(max_new_tokens=4),
+                bootstrap_host="10.0.0.7",
+                bootstrap_port=8998,
+                bootstrap_room=4242,
+            )
+            with mock.patch(
+                "sglang.srt.managers.schedule_batch.get_parallel", return_value=SimpleNamespace(tp_rank=0)
+            ):
+                self.assertTrue(Scheduler._reject_mm_transport_failure(stub, req), mode)
+            self.assertEqual(queued, [], mode)
+            self.assertEqual(touched, [], mode)
+            self.assertEqual(len(streamed), 1, mode)
+            (out,) = streamed[0]
+            fin = out.finished_reason
+            self.assertIsInstance(fin, FINISH_ABORT)
+            self.assertEqual(fin.status_code, HTTPStatus.INTERNAL_SERVER_ERROR)
+            self.assertEqual(fin.err_type, "InternalServerError")
+            self.assertIn("lost segment", fin.message)
+            # coordinates survive so nothing downstream sees a None address
+            self.assertEqual((out.bootstrap_host, out.bootstrap_port, out.bootstrap_room), ("10.0.0.7", 8998, 4242))
 
 
 if __name__ == "__main__":
