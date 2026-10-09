@@ -496,10 +496,11 @@ huge pages.
 Both Flash-Next recipes export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`, the accepted
 FP16-accumulate MMA mode of the patched FlashInfer SM12x delta-rule prefill
 kernels ([BUILD.md](BUILD.md#flashinfer-sm120-source-integration)). Export
-`FLASHINFER_GDN_FP16_ACCUM_MMA=0` before startup to opt out; FlashInfer's own
-default is off, the 27B/DFlash2 recipe never sets it, and no other profile's
-numerics change. The recipes export it before the server starts, so changing it
-requires a restart.
+`FLASHINFER_GDN_FP16_ACCUM_MMA=0` before startup to opt out; in a container
+setup, saving or exporting that value reaches the generated launch the same way
+the other forwarded knobs do. FlashInfer's own default is off, the 27B/DFlash2
+recipe never sets it, and no other profile's numerics change. The recipes export
+it before the server starts, so changing it requires a restart.
 
 For Pennyroyal's thinking-enabled agentic use, the launcher defaults to medium
 reasoning effort. Chat Completions `reasoning_effort` takes precedence over

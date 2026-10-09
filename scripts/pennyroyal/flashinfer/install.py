@@ -32,6 +32,11 @@ compiler and job-count controls (CUDAHOSTCXX, MAX_JOBS, FLASHINFER_NVCC_THREADS)
 FLASHINFER_CUDA_ARCH_LIST is set to the accepted SM120 family target for this
 build because FlashInfer ignores TORCH_CUDA_ARCH_LIST here.  Set
 FLASHINFER_WORKSPACE_BASE to keep the ninja objects between runs.
+
+An environment that predates this pin keeps a stale flashinfer-jit-cache shim
+beside the new FlashInfer, and FlashInfer rejects that combination while
+importing its JIT environment; the step names those wheels before the build
+starts, with the aligned family recorded in accepted-sources.json.
 """
 
 import argparse
@@ -115,6 +120,31 @@ def require_accepted_pin(source: dict, package: Path) -> str:
     return version
 
 
+def require_aligned_jit_cache(source: dict, package: Path) -> None:
+    """Stop a stale JIT-cache shim before the build imports FlashInfer.
+
+    flashinfer-python 0.7.0.post1 checks the flashinfer-jit-cache shim against
+    its own version while importing flashinfer.jit.env, so the 0.6.17+cu130
+    wheel that a v2.5.x environment keeps beside it aborts the compile with a
+    version error from inside the build. The provider wheels only get skipped
+    with a warning, so only the shim is refused here; it is genuinely optional,
+    and without it FlashInfer compiles the other kernels on first use.
+    """
+    pin = source["flashinfer_python"]
+    for info in sorted(package.parent.glob("flashinfer_jit_cache-*.dist-info")):
+        version = info.name.removesuffix(".dist-info").rsplit("-", 1)[1]
+        if version == pin or version.startswith(f"{pin}+"):
+            continue
+        raise fail(
+            f"{info} is flashinfer-jit-cache {version}, which "
+            f"flashinfer-python {pin} refuses at import time; install "
+            f"'flashinfer-jit-cache=={source['flashinfer_jit_cache']}' and "
+            f"'flashinfer-jit-cache-sm120f=={source['flashinfer_jit_cache']}' "
+            "with --no-deps from https://flashinfer.ai/whl/cu130 as in BUILD.md, "
+            "or uninstall it to compile the other kernels on first use"
+        )
+
+
 def _classify(root: Path, entry: dict) -> tuple[str, str]:
     """Tell the stock source, the accepted source and anything else apart."""
     verdicts = set()
@@ -181,7 +211,13 @@ def apply_accepted_source(package: Path, source: dict) -> list[str]:
 
 
 def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
-    """Build the patched SM120 module and put it where the loader prefers it."""
+    """Build the patched SM120 module and put it where the loader prefers it.
+
+    Both guards are cheap and repeated by main() before it patches anything, so
+    a direct caller of this function still cannot reach the import error.
+    """
+    require_accepted_pin(source, package)
+    require_aligned_jit_cache(source, package)
     env = dict(
         os.environ,
         FLASHINFER_CUDA_ARCH_LIST=source["cuda_arch_list"],
@@ -235,6 +271,7 @@ def check_installed(
     that merely copied the prebuilt kernel into place also fails.
     """
     version = require_accepted_pin(source, package)
+    require_aligned_jit_cache(source, package)
     for entry in source["patches"]:
         root = (package / entry["root"]).resolve()
         verdict, detail = _classify(root, entry)
@@ -324,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(check_installed(package, source), indent=2))
         else:
             require_accepted_pin(source, package)
+            require_aligned_jit_cache(source, package)
             for status in apply_accepted_source(package, source):
                 print(status)
             if not args.apply_only:

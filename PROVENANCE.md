@@ -49,12 +49,13 @@ by `scripts/pennyroyal/flashinfer/install.py`:
 | Item | Value |
 |---|---|
 | Pinned distribution | `flashinfer_python[cu13]==0.7.0.post1`, wheel SHA-256 `c7adf826568d61fc1b7d3aadd4cae387a35a138bfc08e2deca2f34ecfa280716` |
+| JIT-cache family | `flashinfer-jit-cache` and `flashinfer-jit-cache-sm120f` at `0.7.0.post1+cu130`; the image installs both with `--no-deps`, and the packaging step refuses a stale shim from the 0.6.17 line instead of failing inside the compile |
 | FlashInfer preimage | upstream base `946200de1ae94fc93fdd0926f0a13afd1fa7f0f1` |
 | Carried mailboxes | `scripts/pennyroyal/flashinfer/patches/moe-source.patch`, `patches/gdn-source.patch` (git-format-patch, production files only) |
 | MoE commits | `5e86c489f5759cb4006d3b1b5e7bdd14f7a581df`, `b9fa8893102dc3bbcec92762230e7f1678644a4e`, `2a4d8d3a9501bf3b3fe3b78d7c6bad38bfc76064` — Penny `<Pennyroyal@agentmail.to>`, port of `aiueo52/flash-next-rtxpro6000` at `524af49abcca66fcb4377ba8297022804535fccf` and `e0fa9fa9fc3ccd710a8fb3d2639b85ce62188c23` |
 | GDN commit | `0b0ba4c2b18173303b46dd8ec381735e1615b313` — aa24aa `<2496788660@qq.com>`, cherry picked from `c0771c79b7e2f2bc0edf4fdcb7c43b986a56707a`, upstream FlashInfer #6227 |
 | Built module | `flashinfer/data/aot/fused_moe_120/fused_moe_120.so`, compiled with `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
-| Profile default | the two Next recipes and the two Next startup files export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`; FlashInfer's own default and the 27B profile are unchanged |
+| Profile default | the two Next recipes and the two Next startup files export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`; an explicit opt-out is carried by the container settings propagation, and FlashInfer's own default and the 27B profile are unchanged |
 
 `accepted-sources.json` records the SHA-256 of every affected file before and
 after the patch, which is what the step and the image check compare against; it

@@ -878,9 +878,10 @@ def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
         "LAUNCH_DIR": str(tmp_path / "generated"),
         "SGLANG_FORWARD_UNKNOWN_TOOLS": "false",
         # Saved but not one of the wizard's own keys: docker compose forwards
-        # these two today, so the generated launch must not lose them either.
+        # these today, so the generated launch must not lose them either.
         "PENNY_REASONING_EFFORT": "high",
         "NCCL_P2P_DISABLE": "1",
+        "FLASHINFER_GDN_FP16_ACCUM_MMA": "0",
         "TARGET_MODEL": "/models/penny-model",
     }
     env_file = tmp_path / "container.env"
@@ -940,8 +941,21 @@ def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
         server_argv, "--default-chat-template-kwargs"
     ), server_argv
     assert server_env["nccl_p2p_disable"] == "1", server_env
+    # The saved GDN opt-out survives the generated startup file's own default,
+    # which is the only reason to forward it.
+    assert server_env["gdn_fp16_accum_mma"] == "0", server_env
     # The profile's qualified flags are untouched by any of this.
     assert argv_after(server_argv, "--speculative-algorithm") == "NEXTN"
+
+    # Nothing forwarded either: the same generated file keeps its qualified
+    # default of 1 rather than honouring an absent setting.
+    unforwarded = {
+        k: v for k, v in passed_through.items() if k != "FLASHINFER_GDN_FP16_ACCUM_MMA"
+    }
+    assert "FLASHINFER_GDN_FP16_ACCUM_MMA" not in unforwarded
+    result, _, default_env, _ = launch(tmp_path, startup, env=unforwarded)
+    assert result.returncode == 0, result.stderr
+    assert default_env["gdn_fp16_accum_mma"] == "1", default_env
 
 
 def test_native_recipes_take_the_same_disk_tier_switch(tmp_path):

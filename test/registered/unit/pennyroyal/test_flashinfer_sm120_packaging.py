@@ -12,6 +12,7 @@ import importlib.util
 import inspect
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -97,6 +98,7 @@ def synthetic_source(root: Path) -> dict:
     )
     return {
         "flashinfer_python": "9.9.9",
+        "flashinfer_jit_cache": "9.9.9+cu130",
         "cuda_arch_list": "12.0f",
         "aot_module": "fused_moe_120",
         "aot_path": "data/aot/fused_moe_120/fused_moe_120.so",
@@ -130,6 +132,7 @@ def raises(call, needle: str) -> None:
 def test_carried_mailboxes_are_the_accepted_source():
     source = source_manifest()
     assert source["flashinfer_python"] == "0.7.0.post1"
+    assert source["flashinfer_jit_cache"] == "0.7.0.post1+cu130"
     assert source["cuda_arch_list"] == "12.0f"
     assert source["aot_path"] == "data/aot/fused_moe_120/fused_moe_120.so"
     assert (
@@ -205,7 +208,9 @@ def test_carried_mailboxes_are_the_accepted_source():
 
 
 def test_accepted_pin_matches_every_dependency_pin():
-    version = source_manifest()["flashinfer_python"]
+    source = source_manifest()
+    version, cache = source["flashinfer_python"], source["flashinfer_jit_cache"]
+    assert cache == f"{version}+cu130"
     assert (
         f'"flashinfer_python[cu13]=={version}"'
         in (REPO / "python/pyproject.toml").read_text()
@@ -383,13 +388,84 @@ def test_both_installation_paths_run_the_one_step():
     assert "scripts/pennyroyal/flashinfer/install.py" in update
     assert "--no-deps -e python" in update
     assert "flashinfer-python" in update  # the prerequisite is spelled out
-    assert "pennyroyal-v2.5.4" not in guide  # no invented release tag
     jit_cache = dockerfile.index("flashinfer-jit-cache-sm120f")
     packaging = dockerfile.index("scripts/pennyroyal/flashinfer/install.py")
     freeze = dockerfile.index("pip check")
     assert jit_cache < packaging < freeze
     assert "PENNY_BUILD_JOBS=4" in dockerfile and "MAX_JOBS=4" in dockerfile
     assert "check_flashinfer_sm120" in CHECK.read_text()
+
+
+def test_a_stale_jit_cache_shim_stops_the_upgrade_before_the_build(tmp_path):
+    """The 0.6.17 -> 0.7.0.post1 native sequence, checked on a stand-in site.
+
+    flashinfer-python's own metadata does not pull the JIT-cache family, so an
+    upgraded environment keeps the old shim, and FlashInfer aborts its import
+    over the mismatch. The step has to name that package instead of dying inside
+    the compile.
+    """
+    module = installer()
+    source = synthetic_source(tmp_path)
+    package = installed_tree(
+        tmp_path / "site", {"kernel.py": "# stock kernel\nreturn 2\n"}, "9.9.9"
+    )
+    (package / source["aot_path"]).parent.mkdir(parents=True)
+    (package / source["aot_path"]).write_bytes(b"built")
+    site = tmp_path / "site"
+
+    def dist_info(name, version):
+        info = site / f"{name}-{version}.dist-info"
+        info.mkdir(exist_ok=True)
+        (info / "METADATA").write_text(f"Name: {name}\nVersion: {version}\n")
+
+    # No cache family at all: genuinely optional, the step still accepts it.
+    module.check_installed(package, source)
+
+    # The stale shim a v2.5.x environment keeps beside the new FlashInfer.
+    dist_info("flashinfer_jit_cache", "0.6.17+cu130")
+    dist_info("flashinfer_jit_cache_sm120f", "0.6.17+cu130")
+    for call in (
+        lambda: module.check_installed(package, source),
+        lambda: module.install_accepted_source(package, source),
+    ):
+        raises(call, "flashinfer-jit-cache 0.6.17+cu130")
+    # The documented remedy: the same pinned family the image installs, which
+    # replaces the old wheel. The provider may stay old -- FlashInfer skips an
+    # incompatible provider with a warning -- because only the shim breaks the
+    # import, and only the shim is refused here.
+    shutil.rmtree(site / "flashinfer_jit_cache-0.6.17+cu130.dist-info")
+    dist_info("flashinfer_jit_cache", "9.9.9+cu130")
+    module.check_installed(package, source)
+
+
+def test_the_documented_recovery_aligns_the_whole_flashinfer_family():
+    guide = BUILD_GUIDE.read_text()
+    # The one fenced command block that touches the JIT-cache family: the prose
+    # may move, the block is what an operator pastes.
+    blocks = [part for part in guide.split("```") if "flashinfer-jit-cache==" in part]
+    assert len(blocks) == 1, blocks
+    recovery = blocks[0]
+    source = source_manifest()
+    for spec in (
+        f"'flashinfer-python[cu13]=={source['flashinfer_python']}'",
+        f"'flashinfer-jit-cache=={source['flashinfer_jit_cache']}'",
+        f"'flashinfer-jit-cache-sm120f=={source['flashinfer_jit_cache']}'",
+    ):
+        assert spec in recovery, spec
+    assert "--no-deps --index-url https://flashinfer.ai/whl/cu130" in recovery
+    assert "scripts/pennyroyal/flashinfer/install.py" in recovery
+    # Both source selections name a release ref rather than an older tag, so the
+    # step cannot be documented against a checkout that lacks it.
+    for sequence in (
+        guide.split("## Fresh install", 1)[1].split("## Update an existing install", 1)[
+            0
+        ],
+        guide.split("## Update an existing install", 1)[1].split("## NIXL POSIX", 1)[0],
+    ):
+        assert "$RELEASE_REF" in sequence, sequence[:200]
+        assert "scripts/pennyroyal/flashinfer/install.py" in sequence
+    assert "--branch pennyroyal-v" not in guide
+    assert "switch --detach pennyroyal-v" not in guide
 
 
 def test_next_recipes_default_the_accepted_gdn_mode_and_27b_does_not():

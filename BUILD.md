@@ -31,7 +31,12 @@ Run this sequence in Bash. It creates a new checkout and Python environment,
 installs the build tools, then installs SGLang and its dependencies once:
 
 ```bash
-git clone --branch pennyroyal-v2.5.3-setup1 --single-branch \
+# Substitute the tag of the release you are installing; the tag that carries
+# this packaging is chosen when that release is published, so it is not named
+# here. The release's own notes give it.
+RELEASE_REF='<release-tag>'
+
+git clone --branch "$RELEASE_REF" --single-branch \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
 cd pennyroyal
 
@@ -50,17 +55,19 @@ uv pip install --prerelease=allow --index-strategy unsafe-best-match \
 .venv/bin/python scripts/pennyroyal/flashinfer/install.py
 ```
 
-The `setup1` tag includes the WSL2 configurator update and the same v2.5.3
-runtime. SGLang is installed as an editable package from this checkout. Keep the
-checkout in place while using this environment.
+Any release at or after the FlashInfer SM120 packaging carries the step below;
+older tags do not, and neither does the released `setup1` configuration update,
+so use the release that includes this source. SGLang is installed as an editable
+package from this checkout. Keep the checkout in place while using this
+environment.
 
 The last command packages the accepted FlashInfer SM120 source into the
 FlashInfer installation of that same environment and compiles the fused-MoE
 module from it; see
 [FlashInfer SM120 source integration](#flashinfer-sm120-source-integration).
 It compiles once per environment, needs the CUDA 13.3 compiler and Ninja, and
-uses the shared job budget below. Users of the prebuilt image run nothing; the
-image already contains the compiled module.
+uses the shared job budget below. Users of the prebuilt image run nothing: the
+image contains the module its own build compiled from these sources.
 
 Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
 [download your checkpoints](#reference-and-measured-checkpoints), then follow
@@ -78,8 +85,9 @@ named `origin`.
 
 ```bash
 cd /path/to/pennyroyal
-git fetch origin tag pennyroyal-v2.5.3-setup1
-git switch --detach pennyroyal-v2.5.3-setup1
+RELEASE_REF='<release-tag>'   # the same release ref as above
+git fetch origin tag "$RELEASE_REF"
+git switch --detach "$RELEASE_REF"
 source .venv/bin/activate
 
 source scripts/pennyroyal/build-env.sh
@@ -89,27 +97,37 @@ uv pip install --no-build-isolation --no-deps -e python
 .venv/bin/python scripts/pennyroyal/flashinfer/install.py
 ```
 
-This updates SGLang without re-resolving the existing dependencies: v2.5.3
-keeps the v2.5.0 PyTorch, `sglang-kernel` and NIXL packages. FlashInfer is the
-one dependency this source does change, and `--no-deps` will not install it for
-you. This source pins `flashinfer-python[cu13]==0.7.0.post1`, which is the
-version the accepted SM120 source patches apply to; environments from v2.5.0 up
-to the `pennyroyal-v2.5.3-setup1` tag have 0.6.17. The FlashInfer step is not
-covered by the dependency reuse either: `--no-deps` leaves the *package* alone,
-but the accepted source has to be present inside it. The step is safe to repeat,
-and rerunning it after any FlashInfer install or upgrade is what keeps the
-environment packaged rather than stock.
+This updates SGLang without re-resolving the existing dependencies: the release
+keeps the PyTorch, `sglang-kernel` and NIXL packages of the v2.5.x dependency
+base. FlashInfer is the one dependency this source does change, and `--no-deps`
+will not install it for you — neither the distribution nor the accepted source
+inside it. This source pins `flashinfer-python[cu13]==0.7.0.post1`, the version
+the accepted SM120 patches apply to; the older tags here have 0.6.17. The step is
+safe to repeat, and rerunning it after any FlashInfer install or upgrade is what
+keeps the environment packaged rather than stock.
 
-The step stops with the version it found if your FlashInfer is not the accepted
-pin. Install the pinned distribution, which re-resolves FlashInfer and its own
-extra and nothing else, then rerun the step:
+The step names what it found if your FlashInfer is not that pin. Its own metadata
+does not depend on the JIT-cache family, so an upgraded environment keeps the old
+`flashinfer-jit-cache 0.6.17+cu130` wheel beside it, and FlashInfer 0.7.0.post1
+rejects that shim while importing its JIT environment — before any compilation.
+Align the family on the same version, using the pinned SM120 provider pair and
+index the image already uses, then run the step:
 
 ```bash
 uv pip install --prerelease=allow --index-strategy unsafe-best-match \
   --extra-index-url https://docs.sglang.ai/whl/cu130/ \
   'flashinfer-python[cu13]==0.7.0.post1'
+uv pip install --no-deps --index-url https://flashinfer.ai/whl/cu130 \
+  'flashinfer-jit-cache==0.7.0.post1+cu130' \
+  'flashinfer-jit-cache-sm120f==0.7.0.post1+cu130'
 .venv/bin/python scripts/pennyroyal/flashinfer/install.py
 ```
+
+The cache family is optional here: uninstalling it works too, and FlashInfer
+then compiles the other kernels into its own cache on first use. Nothing else is
+re-resolved either way — PyTorch, `sglang-kernel`, Triton and NIXL keep the
+versions the environment already has. The step itself only needs the
+`flashinfer-python` distribution and this checkout.
 
 If you use NVMe PLE, also refresh the [isolated reader](#optional-nvme-ple-reader)
 for the new source version. The prepared PLE overlay can be reused.
@@ -346,9 +364,10 @@ not change FlashInfer's own default, the online-FP8 choice or the 27B profile.
 
 ### Source and earlier wheels
 
-The exact v2.5.3 executable source is recorded in [PROVENANCE.md](PROVENANCE.md).
-This release uses updated Python/JIT sources on the existing dependency stack;
-no new prebuilt wheel is distributed. The optional NVMe reader is a separate
+The exact executable source of each release is recorded in
+[PROVENANCE.md](PROVENANCE.md). Releases that carry the FlashInfer SM120
+integration above use the pinned 0.7.0.post1 dependency set; no new prebuilt
+wheel is distributed. The optional NVMe reader is a separate
 isolated install and is not included in the main SGLang wheel.
 
 The earlier v2.1.2/v2.3 wheel from source `836206a0ad` has SHA-256

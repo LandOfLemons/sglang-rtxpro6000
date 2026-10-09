@@ -61,10 +61,14 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
   [FlashInfer SM120 source integration](BUILD.md#flashinfer-sm120-source-integration)
   for the pin, the build path and the profile default, and
   [PROVENANCE.md](PROVENANCE.md#flashinfer-sm120-accepted-source) for the
-  attribution. FlashInfer's own GDN default stays off; only the Next recipes and
-  Next startup files opt in, and `FLASHINFER_MOE_FUSED_PROLOGUE=0` remains the
-  MoE kill switch. Online FP8, routing, GEMV and normalization defaults are
-  untouched.
+  attribution. Upgrading from a 0.6.17 environment needs the matching
+  `flashinfer-jit-cache` family, which BUILD.md now installs in the same step;
+  the packaging command names the stale wheel instead of failing inside the
+  compile. FlashInfer's own GDN default stays off; only the Next recipes and
+  Next startup files opt in, a saved or inherited
+  `FLASHINFER_GDN_FP16_ACCUM_MMA=0` reaches the container through the existing
+  settings propagation, and `FLASHINFER_MOE_FUSED_PROLOGUE=0` remains the MoE
+  kill switch. Online FP8, routing, GEMV and normalization defaults are untouched.
 - **NIXL and host allocation:** correct hybrid storage-component counts and
   include opt-in pinned-host allocation/device-alias support adapted from
   [LandOfLemons' PR #24](https://github.com/jpezzulli/sglang-rtxpro6000/pull/24).

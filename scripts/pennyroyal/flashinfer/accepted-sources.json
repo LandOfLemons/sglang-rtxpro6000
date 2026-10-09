@@ -13,6 +13,7 @@
   "flashinfer_base_commit": "946200de1ae94fc93fdd0926f0a13afd1fa7f0f1",
   "flashinfer_wheel": "flashinfer_python-0.7.0.post1-py3-none-any.whl",
   "flashinfer_wheel_sha256": "c7adf826568d61fc1b7d3aadd4cae387a35a138bfc08e2deca2f34ecfa280716",
+  "flashinfer_jit_cache": "0.7.0.post1+cu130",
   "cuda_arch_list": "12.0f",
   "aot_module": "fused_moe_120",
   "aot_path": "data/aot/fused_moe_120/fused_moe_120.so",
