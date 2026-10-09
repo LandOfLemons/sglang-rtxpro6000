@@ -83,8 +83,10 @@ class MambaComponent(TreeComponent):
         self._mamba_pool_host = None  # set to host mamba pool when HiCache enabled
         self._resume_leases: dict[str, dict[int, bool]] = {}
         self._resume_pins: dict[str, dict[str, int]] = {}
-        # node id -> (session id, session generation) waiting for a durable host backup
-        self._pending_resume_backup: dict[int, tuple[str, int]] = {}
+        # node id -> {session id: session generation} waiting for a durable
+        # host backup. Several sessions can share one device-only checkpoint,
+        # so keep every eligible owner and cancel them independently.
+        self._pending_resume_backup: dict[int, dict[str, int]] = {}
 
     def needs_incremental_backup(self, node: UnifiedTreeNode) -> bool:
         data = node.component_data[self.component_type]
@@ -330,7 +332,9 @@ class MambaComponent(TreeComponent):
             self._pending_resume_backup.pop(node.id, None)
             self._pin_resume(session_id, node, "commit")
             return
-        self._pending_resume_backup[node.id] = (session_id, req.session_generation)
+        self._pending_resume_backup.setdefault(node.id, {})[session_id] = (
+            req.session_generation
+        )
 
     def _release_resume_leases(self, session_id: str) -> None:
         self._resume_pins.pop(session_id, None)
@@ -343,11 +347,10 @@ class MambaComponent(TreeComponent):
                 continue
             self._host_unlock_resume(session_id, node, "released")
         self._resume_leases.pop(session_id, None)
-        self._pending_resume_backup = {
-            node_id: owner
-            for node_id, owner in self._pending_resume_backup.items()
-            if owner[0] != session_id
-        }
+        for node_id, owners in list(self._pending_resume_backup.items()):
+            owners.pop(session_id, None)
+            if not owners:
+                self._pending_resume_backup.pop(node_id, None)
 
     def _node_is_ancestor(
         self, ancestor: UnifiedTreeNode, node: UnifiedTreeNode
@@ -473,8 +476,10 @@ class MambaComponent(TreeComponent):
             if not pins:
                 self._resume_pins.pop(session_id, None)
         pending = self._pending_resume_backup.get(node.id)
-        if pending is not None and pending[0] == session_id:
-            self._pending_resume_backup.pop(node.id, None)
+        if pending is not None:
+            pending.pop(session_id, None)
+            if not pending:
+                self._pending_resume_backup.pop(node.id, None)
         self._host_unlock_resume(session_id, node, "released")
 
     def _tombstone_mamba_host(
@@ -486,13 +491,16 @@ class MambaComponent(TreeComponent):
         dropped: list[int] = []
         try:
             for node in nodes:
+                # This session no longer resumes from these nodes, so drop its
+                # own pins and pending backup ownership first. A device-only
+                # node has no host copy to tombstone, but a backup that lands
+                # later would otherwise repin the abandoned branch.
+                self._release_own_pin(session_id, node)
                 cd = node.component_data[self.component_type]
                 if cd.host_value is None:
                     continue
                 if self._drop_blocked(node, session_id, nodes[0]):
                     continue
-                self._release_own_pin(session_id, node)
-                cd = node.component_data[self.component_type]
                 if (
                     cd.host_value is None
                     or cd.host_lock_ref > 0
@@ -533,6 +541,10 @@ class MambaComponent(TreeComponent):
     ) -> None:
         if stop is None or leaf is stop:
             return
+        # Another session's marker can block the host drop below the fork, but
+        # it says nothing about this session's own ownership of the branch it
+        # just abandoned.
+        self._release_own_pin(session_id, leaf)
         path = self._tail_below(leaf, stop, session_id)
         if not path:
             return
@@ -1284,13 +1296,13 @@ class MambaComponent(TreeComponent):
                 if cd.host_value is None:
                     cd.host_value = transfers[0].host_indices.clone()
                 pending = self._pending_resume_backup.pop(node.id, None)
-                if pending is not None and cd.host_value is not None:
-                    session_id, generation = pending
+                if pending and cd.host_value is not None:
                     tracker = self._resume_tracker()
-                    if tracker is not None and tracker.pin_still_current(
-                        session_id, generation
-                    ):
-                        self._pin_resume(session_id, node, "commit")
+                    for session_id, generation in pending.items():
+                        if tracker is not None and tracker.pin_still_current(
+                            session_id, generation
+                        ):
+                            self._pin_resume(session_id, node, "commit")
 
         elif phase == CacheTransferPhase.LOAD_BACK:
             if not transfers:

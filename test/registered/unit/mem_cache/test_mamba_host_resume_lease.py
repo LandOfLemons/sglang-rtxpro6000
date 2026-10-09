@@ -68,10 +68,10 @@ def _cd(host=True):
 
 
 class _Node:
-    def __init__(self, node_id, parent, host=True):
+    def __init__(self, node_id, parent, host=True, tokens=()):
         self.id = node_id
         self.parent = parent
-        self.key = None
+        self.key = list(tokens) if tokens else None
         self.children = {}
         self.component_data = {MAMBA: _cd(host)}
 
@@ -82,8 +82,8 @@ class _Node:
         return isinstance(other, _Node) and other.id == self.id
 
 
-def _node(node_id, parent, host=True):
-    return _Node(node_id, parent, host)
+def _node(node_id, parent, host=True, tokens=()):
+    return _Node(node_id, parent, host, tokens)
 
 
 class ResumeLeaseTests(unittest.TestCase):
@@ -240,13 +240,13 @@ class ResumeLeaseTests(unittest.TestCase):
         req = self._req("s", generation)
         self.comp._note_inserted_resume(req, self._insert(node))
         self.assertEqual(
-            self.comp._pending_resume_backup[node.id], ("s", generation)
+            self.comp._pending_resume_backup[node.id], {"s": generation}
         )
         self.tracker.release_radix_session("s")
         self.assertNotIn(node.id, self.comp._pending_resume_backup)
 
         # A backup that still holds the old session id must not pin after close.
-        self.comp._pending_resume_backup[node.id] = ("s", generation)
+        self.comp._pending_resume_backup[node.id] = {"s": generation}
         node.component_data[MAMBA].host_value = [1]
         self.comp.commit_hicache_transfer(
             node,
@@ -258,6 +258,106 @@ class ResumeLeaseTests(unittest.TestCase):
         )
         self.assertEqual(node.component_data[MAMBA].host_lock_ref, 0)
         self.assertNotIn(node.id, self.comp._pending_resume_backup)
+
+
+    def test_fork_cancels_a_pending_backup_on_a_device_only_abandoned_leaf(self):
+        generation = self._open()
+        req = self._req("s", generation)
+        shared = self._add(_node(1, self.root))
+        # The abandoned branch is deeper, so it also blocks a shallower pin.
+        abandoned = self._add(_node(2, shared, host=False, tokens=[20, 30]))
+        abandoned.component_data[MAMBA].value = [1]
+        abandoned.component_data[MAMBA].session_ids = {"s"}
+        shared.children = {2: abandoned}
+        self.comp._session_leaves["s"].add(abandoned)
+
+        self.comp._note_inserted_resume(req, self._insert(abandoned))
+        self.assertEqual(
+            self.comp._pending_resume_backup[abandoned.id], {"s": generation}
+        )
+
+        branch = self._add(_node(3, shared, tokens=[40]))
+        shared.children = {2: abandoned, 3: branch}
+        self.comp.register_session_leaf("s", branch)
+        self.assertNotIn(abandoned.id, self.comp._pending_resume_backup)
+
+        # The abandoned backup lands after the fork. Same open generation, so
+        # only the cancelled ownership can keep it from stealing the pin.
+        abandoned.component_data[MAMBA].host_value = [1]
+        self.comp.commit_hicache_transfer(
+            abandoned,
+            CacheTransferPhase.BACKUP_HOST,
+            transfers=[
+                SimpleNamespace(host_indices=SimpleNamespace(clone=lambda: [1]))
+            ],
+            cache_actions=[],
+        )
+        self.assertNotIn("s", self.comp._resume_pins)
+        self.assertEqual(abandoned.component_data[MAMBA].host_lock_ref, 0)
+
+        # The live branch is shallower, so it can only pin once the abandoned
+        # checkpoint stopped holding the pin.
+        self.comp._note_inserted_resume(req, self._insert(branch))
+        self.assertEqual(self.comp._resume_pins, {"s": {"commit": branch.id}})
+        self.assertEqual(branch.component_data[MAMBA].host_lock_ref, 1)
+        self.assertEqual(abandoned.component_data[MAMBA].host_lock_ref, 0)
+
+    def test_two_sessions_sharing_a_device_only_node_keep_both_pending_owners(self):
+        first = self._open("a")
+        second = self._open("b")
+        node = self._add(_node(1, self.root, host=False))
+        node.component_data[MAMBA].value = [1]
+        self.comp._note_inserted_resume(self._req("a", first), self._insert(node))
+        self.comp._note_inserted_resume(self._req("b", second), self._insert(node))
+        self.assertEqual(
+            self.comp._pending_resume_backup[node.id], {"a": first, "b": second}
+        )
+
+        self.tracker.release_radix_session("b")
+        self.assertEqual(self.comp._pending_resume_backup[node.id], {"a": first})
+
+        node.component_data[MAMBA].host_value = [1]
+        self.comp.commit_hicache_transfer(
+            node,
+            CacheTransferPhase.BACKUP_HOST,
+            transfers=[
+                SimpleNamespace(host_indices=SimpleNamespace(clone=lambda: [1]))
+            ],
+            cache_actions=[],
+        )
+        self.assertEqual(self.comp._resume_pins, {"a": {"commit": node.id}})
+        self.assertEqual(node.component_data[MAMBA].host_lock_ref, 1)
+
+        # A reopened id is a new incarnation and pins the checkpoint on its own.
+        third = self._open("b")
+        self.comp._note_inserted_resume(self._req("b", third), self._insert(node))
+        self.assertEqual(node.component_data[MAMBA].host_lock_ref, 2)
+
+        self.tracker.release_radix_session("a")
+        self.assertEqual(node.component_data[MAMBA].host_lock_ref, 1)
+        self.assertEqual(self.comp._resume_pins, {"b": {"commit": node.id}})
+
+    def test_fork_cancels_only_the_forking_session_pending_owner(self):
+        first = self._open("a")
+        second = self._open("b")
+        shared = self._add(_node(1, self.root))
+        abandoned = self._add(_node(2, shared, host=False))
+        abandoned.component_data[MAMBA].value = [1]
+        abandoned.component_data[MAMBA].session_ids = {"a", "b"}
+        shared.children = {2: abandoned}
+        self.comp._session_leaves["a"].add(abandoned)
+        self.comp._session_leaves["b"].add(abandoned)
+        self.comp._note_inserted_resume(self._req("a", first), self._insert(abandoned))
+        self.comp._note_inserted_resume(self._req("b", second), self._insert(abandoned))
+
+        # b forks; a still resumes from the shared checkpoint, so the host copy
+        # stays and only b's pending ownership goes.
+        branch = self._add(_node(3, shared))
+        shared.children = {2: abandoned, 3: branch}
+        self.comp.register_session_leaf("b", branch)
+        self.assertEqual(self.comp._pending_resume_backup[abandoned.id], {"a": first})
+        self.assertEqual(abandoned.component_data[MAMBA].host_value, None)
+        self.assertEqual(self.freed, [])
 
 
 if __name__ == "__main__":
