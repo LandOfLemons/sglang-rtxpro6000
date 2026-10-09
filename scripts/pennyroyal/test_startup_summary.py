@@ -70,7 +70,7 @@ class StartupSummaryTest(unittest.TestCase):
         self.assertIn("FR-Spec: on | Online FP8: true | KV dtype: fp8_e4m3", output)
         self.assertIn("Context: 524288 tokens | KV cap: 824384", output)
         self.assertIn("Max running requests: 4 | Mamba slots: 24", output)
-        self.assertIn("PLE: host RAM | HiCache: true | Host tier: 32 GiB", output)
+        self.assertIn("PLE: host RAM | HiCache: true | Host tier: 32 GB", output)
         self.assertIn(
             "Storage backend: nixl | NIXL location: /cache/NIXL pool [one]", output
         )

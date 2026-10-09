@@ -58,7 +58,8 @@ pennyroyal_startup_summary() {
     "${setting[--context-length]:-automatic}" "${setting[--max-total-tokens]:-automatic}"
   printf '  Max running requests: %s | Mamba slots: %s\n' \
     "${setting[--max-running-requests]:-automatic}" "${setting[--max-mamba-cache-size]:-automatic}"
-  printf '  PLE: %s | HiCache: %s | Host tier: %s GiB\n' \
+  # SGLang sizes the host pool at size * 1e9 bytes (decimal GB, not GiB).
+  printf '  PLE: %s | HiCache: %s | Host tier: %s GB\n' \
     "$ple" "${setting[--enable-hierarchical-cache]:-false}" "${setting[--hicache-size]:-automatic}"
   printf '  Storage backend: %s | NIXL location: %s\n' \
     "${setting[--hicache-storage-backend]:-none}" "${SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR:-not set}"
