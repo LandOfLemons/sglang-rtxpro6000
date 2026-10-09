@@ -70,7 +70,9 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
   ignores `CUDAHOSTCXX`, so the value is mapped onto `CC` in the build subprocess
   environment alone, leaving the caller's `CC`, the C++/link `CXX`, the toolchain
   versions, the job budget and the source patches as they were. A build failure
-  names the host compiler that was actually used. The SM120 compile also carries one
+  names the host compiler that was actually used and keeps a bounded tail of the
+  compiler's own output, because Ninja's final line is only `build stopped:
+  subcommand failed` and the fatal diagnostic sits above it. The SM120 compile also carries one
   build-only guard, `patches/asan-include-compat.patch`, because stock
   `memoryUtils.cu` asked for `<sanitizer/asan_interface.h>` unconditionally and the
   image's `gcc15` package does not install that header: a non-ASAN build now needs

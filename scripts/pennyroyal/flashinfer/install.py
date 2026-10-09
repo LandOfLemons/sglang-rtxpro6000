@@ -31,7 +31,9 @@ is in this repository.  The build needs a CUDA compiler and keeps the existing
 job-count controls (MAX_JOBS, FLASHINFER_NVCC_THREADS) and the caller's CXX.  For
 nvcc's host compiler it honours CUDAHOSTCXX by handing FlashInfer that value as
 CC, because FlashInfer reads CC for -ccbin and ignores CUDAHOSTCXX; without the
-override its existing CC behaviour stands.
+override its existing CC behaviour stands.  A failed build reports that effective
+host compiler along with a bounded tail of the compiler's own output, because
+Ninja's final line is only a summary and the fatal diagnostic sits above it.
 FLASHINFER_CUDA_ARCH_LIST is set to the accepted SM120 family target for this
 build because FlashInfer ignores TORCH_CUDA_ARCH_LIST here.  Set
 FLASHINFER_WORKSPACE_BASE to keep the ninja objects between runs.
@@ -70,6 +72,8 @@ PREFIX = "FlashInfer SM120 packaging"
 # it. JitSpec.build() runs the Ninja graph and stops: build_and_load(), or
 # build_jit_specs() with its skip_prebuilt default, would take the stock AOT
 # module and silently compile nothing.
+BUILD_ERROR_TAIL_LINES = 40
+
 BUILD_CODE = """
 import os
 import pathlib
@@ -277,12 +281,18 @@ def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
                 text=True,
             )
         except subprocess.CalledProcessError as error:
-            output = str(error.stderr or "").strip().splitlines()
+            # Ninja's last line is only "build stopped: subcommand failed"; the
+            # compiler diagnostic that matters sits above it, so a bounded tail of
+            # the real output is reported rather than the final summary alone.
+            lines = str(error.stderr or "").strip().splitlines()
+            kept = lines[-BUILD_ERROR_TAIL_LINES:]
+            excerpt = "\n".join(kept) if kept else "no compiler output"
+            if len(lines) > len(kept):
+                excerpt = f"[... {len(lines) - len(kept)} earlier lines ...]\n{excerpt}"
             raise fail(
                 f"the {source['aot_module']} build failed with nvcc host compiler "
                 f"{nvcc_host_compiler(env)}, MAX_JOBS="
-                f"{env.get('MAX_JOBS', 'ninja default')}: "
-                f"{output[-1] if output else 'no compiler output'}"
+                f"{env.get('MAX_JOBS', 'ninja default')}:\n{excerpt}"
             ) from error
         built = Path(result.stdout.strip().splitlines()[-1])
         module = source["aot_module"]

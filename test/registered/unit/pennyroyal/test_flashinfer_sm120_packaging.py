@@ -510,6 +510,75 @@ def test_build_targets_the_patched_sources_without_the_prebuilt_shortcut():
         assert host_path not in text, host_path
 
 
+def test_a_failed_build_keeps_the_compiler_diagnostic(tmp_path, monkeypatch):
+    """Ninja's summary line is not the diagnostic, and the wrapper must not hide it.
+
+    A real FlashInfer compile failure ends in "ninja: build stopped: subcommand
+    failed."; the fatal error an operator needs is further up. The report has to
+    carry that output and the effective host compiler together.
+    """
+    module = installer()
+    source = synthetic_source(tmp_path)
+    package = installed_tree(
+        tmp_path / "site", {"kernel.py": "# stock kernel\nreturn 2\n"}, "9.9.9"
+    )
+    (package / source["aot_path"]).parent.mkdir(parents=True)
+    monkeypatch.setenv("CUDAHOSTCXX", "/usr/bin/g++-15")
+    monkeypatch.setenv("CC", "/usr/bin/gcc")
+    monkeypatch.setenv("MAX_JOBS", "24")
+    # The shape of the real failure: filler, the fatal include error, and the
+    # unhelpful summary ninja prints last.
+    lines = [
+        f"[{n}/101] Building CUDA object CMakeFiles/dir/memoryUtils.cuda.o"
+        for n in range(96)
+    ]
+    stderr = "\n".join(
+        lines
+        + [
+            "/usr/lib/python3.12/site-packages/flashinfer/data/csrc/nv_internal/"
+            "cpp/common/memoryUtils.cu:18:10: fatal error: "
+            "sanitizer/asan_interface.h: No such file or directory",
+            "   18 | #include <sanitizer/asan_interface.h>",
+            "      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~",
+            "compilation terminated.",
+            "ninja: build stopped: subcommand failed.",
+        ]
+    )
+
+    def failing_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args[0], output="", stderr=stderr)
+
+    monkeypatch.setattr(module.subprocess, "run", failing_run)
+    raises(
+        lambda: module.install_accepted_source(package, source),
+        "fatal error: sanitizer/asan_interface.h: No such file or directory",
+    )
+    # Both facts are in the one message: the output that matters, and the
+    # compiler that produced it. Truncation is bounded and says so.
+    try:
+        module.install_accepted_source(package, source)
+    except RuntimeError as error:
+        report = str(error)
+    assert "/usr/bin/g++-15 (CUDAHOSTCXX)" in report, report
+    assert "ninja: build stopped: subcommand failed." in report, report
+    assert "MAX_JOBS=24" in report, report
+    # The excerpt is the bounded tail, and it says how much came before it.
+    tail = module.BUILD_ERROR_TAIL_LINES
+    assert f"[... {len(lines) + 5 - tail} earlier lines ...]" in report, report
+    assert report.splitlines()[-tail:] == stderr.splitlines()[-tail:], report
+    # An empty failure still says so instead of reporting an empty line.
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(
+            subprocess.CalledProcessError(1, a[0], output="", stderr="")
+        ),
+    )
+    raises(
+        lambda: module.install_accepted_source(package, source), "no compiler output"
+    )
+
+
 def test_the_build_subprocess_gets_the_explicit_cuda_host_compiler(tmp_path):
     """CUDAHOSTCXX is what an operator means; CC is what FlashInfer reads.
 
