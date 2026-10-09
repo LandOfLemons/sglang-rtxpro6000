@@ -68,7 +68,10 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
   Next startup files opt in, a saved or inherited
   `FLASHINFER_GDN_FP16_ACCUM_MMA=0` reaches the container through the existing
   settings propagation, and `FLASHINFER_MOE_FUSED_PROLOGUE=0` remains the MoE
-  kill switch. Online FP8, routing, GEMV and normalization defaults are untouched.
+  kill switch. The resolved mode is now one more field of the existing NIXL
+  namespace in all four Next launch paths, so mode 0 and mode 1 cannot share one
+  persisted FILE root; no cache data is deleted and the 27B namespace fields are
+  untouched. Online FP8, routing, GEMV and normalization defaults are untouched.
 - **NIXL and host allocation:** correct hybrid storage-component counts and
   include opt-in pinned-host allocation/device-alias support adapted from
   [LandOfLemons' PR #24](https://github.com/jpezzulli/sglang-rtxpro6000/pull/24).

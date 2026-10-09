@@ -304,7 +304,10 @@ The mode is part of the qualified Next profile: export
 `FLASHINFER_GDN_FP16_ACCUM_MMA=0` before launch, or change the line in the
 recipe or the mounted startup script, to run the kernels exactly as released.
 FlashInfer's own default stays off, the 27B/DFlash2 recipe never sets the
-variable, and its Triton GDN path and numerics are unchanged.
+variable, and its Triton GDN path and numerics are unchanged. The resolved mode is
+one of the NIXL namespace fields, so the two modes use separate persistent roots:
+nothing is deleted, and the root you leave behind stays as ordinary user-owned
+cache.
 
 The two v2.5.0 options are independent. The default recipe uses the original
 checkpoint precision and RAM-backed PLE:
@@ -500,7 +503,8 @@ kernels ([BUILD.md](BUILD.md#flashinfer-sm120-source-integration)). Export
 setup, saving or exporting that value reaches the generated launch the same way
 the other forwarded knobs do. FlashInfer's own default is off, the 27B/DFlash2
 recipe never sets it, and no other profile's numerics change. The recipes export
-it before the server starts, so changing it requires a restart.
+it before the server starts, so changing it requires a restart, and the resolved
+mode is part of the NIXL cache identity.
 
 For Pennyroyal's thinking-enabled agentic use, the launcher defaults to medium
 reasoning effort. Chat Completions `reasoning_effort` takes precedence over

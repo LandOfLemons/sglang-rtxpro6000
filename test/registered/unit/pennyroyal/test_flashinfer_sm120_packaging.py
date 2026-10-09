@@ -41,6 +41,10 @@ OTHER_SCRIPTS = (
 GDN_EXPORT = (
     'export FLASHINFER_GDN_FP16_ACCUM_MMA="${FLASHINFER_GDN_FP16_ACCUM_MMA:-1}"'
 )
+GDN_RESOLVE = (
+    'if [[ "$FLASHINFER_GDN_FP16_ACCUM_MMA" == 1 ]]; then GDN_FP16_ACCUM_MMA=on; fi'
+)
+GDN_FIELD = '--field "gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA" \\'
 DIGEST = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
@@ -470,7 +474,8 @@ def test_the_documented_recovery_aligns_the_whole_flashinfer_family():
 
 def test_next_recipes_default_the_accepted_gdn_mode_and_27b_does_not():
     for script in NEXT_SCRIPTS:
-        lines = script.read_text().splitlines()
+        text = script.read_text()
+        lines = text.splitlines()
         assert GDN_EXPORT in lines, script
         # Before the interpreter or the server starts, so FlashInfer reads it.
         first_start = min(
@@ -479,8 +484,33 @@ def test_next_recipes_default_the_accepted_gdn_mode_and_27b_does_not():
             if '"$PYTHON"' in line or '"$SGLANG_EXE"' in line
         )
         assert lines.index(GDN_EXPORT) < first_start, script
+        # The mode changes the computation, so it has to change the persisted
+        # identity too: resolved to the mode it actually selects, then named in
+        # the recipe's existing namespace field list, before the helper runs.
+        assert GDN_RESOLVE in lines, script
+        assert GDN_FIELD in text, script
+        assert text.index("GDN_FP16_ACCUM_MMA=off") < text.index(GDN_FIELD), script
+        # It sits inside the existing field list, next to the other recurrent
+        # state mode, in the one derivation call that selects the cache root.
+        sibling = [
+            i for i, line in enumerate(lines) if "gdn_mtp_cache_mode=none" in line
+        ]
+        field_at = [
+            i for i, line in enumerate(lines) if line.strip() == GDN_FIELD.strip()
+        ]
+        assert len(sibling) == len(field_at) == 1, (script, sibling, field_at)
+        assert field_at[0] == sibling[0] + 1, (
+            script,
+            lines[sibling[0]],
+            lines[field_at[0]],
+        )
+        assert lines[field_at[0]].startswith(
+            lines[sibling[0]][: -len(lines[sibling[0]].lstrip())]
+        ), script
     for script in OTHER_SCRIPTS:
-        assert "FLASHINFER_GDN_FP16_ACCUM_MMA" not in script.read_text(), script
+        text = script.read_text()
+        assert "FLASHINFER_GDN_FP16_ACCUM_MMA" not in text, script
+        assert "gdn_fp16_accum_mma" not in text, script
     # The accepted source keeps the mode off; no global FlashInfer default moved.
     assert (
         "FLASHINFER_GDN_FP16_ACCUM_MMA"

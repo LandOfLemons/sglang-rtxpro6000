@@ -55,7 +55,7 @@ by `scripts/pennyroyal/flashinfer/install.py`:
 | MoE commits | `5e86c489f5759cb4006d3b1b5e7bdd14f7a581df`, `b9fa8893102dc3bbcec92762230e7f1678644a4e`, `2a4d8d3a9501bf3b3fe3b78d7c6bad38bfc76064` — Penny `<Pennyroyal@agentmail.to>`, port of `aiueo52/flash-next-rtxpro6000` at `524af49abcca66fcb4377ba8297022804535fccf` and `e0fa9fa9fc3ccd710a8fb3d2639b85ce62188c23` |
 | GDN commit | `0b0ba4c2b18173303b46dd8ec381735e1615b313` — aa24aa `<2496788660@qq.com>`, cherry picked from `c0771c79b7e2f2bc0edf4fdcb7c43b986a56707a`, upstream FlashInfer #6227 |
 | Built module | `flashinfer/data/aot/fused_moe_120/fused_moe_120.so`, compiled with `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
-| Profile default | the two Next recipes and the two Next startup files export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`; an explicit opt-out is carried by the container settings propagation, and FlashInfer's own default and the 27B profile are unchanged |
+| Profile default | the two Next recipes and the two Next startup files export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`; an explicit opt-out is carried by the container settings propagation, the resolved mode is a NIXL namespace field (`gdn_fp16_accum_mma`), and FlashInfer's own default and the 27B profile are unchanged |
 
 `accepted-sources.json` records the SHA-256 of every affected file before and
 after the patch, which is what the step and the image check compare against; it

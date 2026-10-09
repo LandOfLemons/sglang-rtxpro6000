@@ -195,7 +195,8 @@ def test_next_profiles_default_the_accepted_gdn_mode(tmp_path):
     # The accepted FlashInfer GDN fix is opted in per Next profile, in the
     # launched process's own environment: the image recipe and the operator's
     # mounted startup file both default it, an explicit opt-out survives, and
-    # the 27B profile never sees the variable at all.
+    # the 27B profile never sees the variable at all. The mode also separates the
+    # persisted NIXL identity, because the two kernels write different numbers.
     mounted = prepared_config(tmp_path, "start-flash-next.sh") / "start-flash-next.sh"
     plain = prepared_config(tmp_path, "start-27b-dflash2.sh") / "start-27b-dflash2.sh"
     for startup, via_entrypoint in (
@@ -207,6 +208,22 @@ def test_next_profiles_default_the_accepted_gdn_mode(tmp_path):
         )
         assert result.returncode == 0, (startup, result.stderr)
         assert server_env["gdn_fp16_accum_mma"] == "1", startup
+        assert server_env["namespace"] != "unset", startup
+        modes = {"default": server_env["namespace"]}
+        for label, value in (("explicit on", "1"), ("off", "0"), ("unenabled", "true")):
+            result, _, env, _ = launch(
+                tmp_path,
+                startup,
+                through_entrypoint=via_entrypoint,
+                env={"FLASHINFER_GDN_FP16_ACCUM_MMA": value},
+            )
+            assert result.returncode == 0, (startup, result.stderr)
+            assert env["gdn_fp16_accum_mma"] == value, env
+            modes[label] = env["namespace"]
+        # Only the literal 1 enables the kernels, and only the resolved mode is
+        # cache identity: a value that does not enable must not fork the root.
+        assert modes["explicit on"] == modes["default"] != modes["off"], modes
+        assert modes["unenabled"] == modes["off"], modes
         result, _, opted_out, _ = launch(
             tmp_path,
             startup,
@@ -224,6 +241,15 @@ def test_next_profiles_default_the_accepted_gdn_mode(tmp_path):
         )
         assert result.returncode == 0, (startup, result.stderr)
         assert server_env["gdn_fp16_accum_mma"] == "unset", startup
+        # The 27B namespace is untouched by the Next-only knob.
+        result, _, opted_out, _ = launch(
+            tmp_path,
+            startup,
+            through_entrypoint=via_entrypoint,
+            env={"FLASHINFER_GDN_FP16_ACCUM_MMA": "0"},
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert opted_out["namespace"] == server_env["namespace"], startup
 
 
 def test_launcher_default_startup_keeps_the_script_own_nixl_config(tmp_path):
@@ -956,6 +982,13 @@ def test_a_generated_launch_forwards_the_saved_value_end_to_end(tmp_path):
     result, _, default_env, _ = launch(tmp_path, startup, env=unforwarded)
     assert result.returncode == 0, result.stderr
     assert default_env["gdn_fp16_accum_mma"] == "1", default_env
+    # Saved 0 and nothing saved are different representations of the recurrent
+    # prefill computation, so they must not land on one persisted NIXL root.
+    assert server_env["namespace"] != "unset", server_env
+    assert default_env["namespace"] != server_env["namespace"], (
+        default_env,
+        server_env,
+    )
 
 
 def test_native_recipes_take_the_same_disk_tier_switch(tmp_path):
