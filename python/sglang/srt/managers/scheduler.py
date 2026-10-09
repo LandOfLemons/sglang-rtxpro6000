@@ -2438,10 +2438,45 @@ class Scheduler(
             mm_inputs.release_features()
             req.multimodal_inputs = None
 
+    def _reject_mm_transport_failure(self, recv_req, *, generate: bool = True) -> bool:
+        """Abort a request whose multimodal features were lost in transport.
+
+        The request receiver replaces ``mm_inputs`` with an MMInputsProcessError
+        marker on every rank when a shared-memory feature segment could not be
+        materialized. Such a request must never reach session handling (which
+        dereferences mm_items while stripping a BOS and mutates session state)
+        nor the model; it is answered with a retryable 500 here, first thing.
+        """
+        marker = recv_req.mm_inputs
+        if not isinstance(marker, MMInputsProcessError):
+            return False
+        req = Req(
+            recv_req.rid,
+            recv_req.input_text,
+            recv_req.input_ids,
+            recv_req.sampling_params,
+            vocab_size=self.model_config.vocab_size,
+            http_worker_ipc=recv_req.http_worker_ipc,
+        )
+        req.tokenizer = self.tokenizer
+        req.set_finish_with_abort(
+            marker.message,
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            err_type="InternalServerError",
+        )
+        if generate:
+            self.init_req_max_new_tokens(req)
+        self._add_request_to_queue(req)
+        return True
+
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        # Features lost in transport: reject before any session/state handling.
+        if self._reject_mm_transport_failure(recv_req):
+            return
+
         # Route: normal request / session request / session-not-found
         session_id = (
             recv_req.session_params.id if recv_req.session_params is not None else None
@@ -2948,6 +2983,8 @@ class Scheduler(
         self,
         recv_req: TokenizedEmbeddingReqInput,
     ):
+        if self._reject_mm_transport_failure(recv_req, generate=False):
+            return
         req = Req(
             recv_req.rid,
             recv_req.input_text,

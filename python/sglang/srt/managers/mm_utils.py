@@ -37,6 +37,7 @@ from sglang.srt.managers.schedule_batch import (
     CudaIpcTensorTransportProxy,
     Modality,
     MultimodalInputs,
+    MultimodalProcessorOutput,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.multimodal.transport import (
@@ -1486,21 +1487,35 @@ def _feature_has_shm(feat) -> bool:
     return False
 
 
+def _mm_items_of(obj):
+    """The request's mm_items, or None when it carries no multimodal input.
+
+    ``mm_inputs`` is a MultimodalProcessorOutput (fresh from the tokenizer), a
+    MultimodalInputs (after ingest), None, or an MMInputsProcessError marker for
+    a request whose features were lost in transport. The marker has no items
+    and must pass through every SHM helper untouched — it may still be
+    forwarded to the next pipeline stage, which rejects it the same way.
+    """
+    if not isinstance(obj, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)):
+        return None
+    mm_inputs = obj.mm_inputs
+    if isinstance(mm_inputs, (MultimodalProcessorOutput, MultimodalInputs)):
+        return mm_inputs.mm_items
+    return None
+
+
 def has_shm_features(recv_reqs):
     """Return True if any request in the list contains ShmPointerMMData."""
     for req in recv_reqs:
         if isinstance(req, BaseBatchReq):
             if has_shm_features(req.batch):
                 return True
-        elif (
-            isinstance(req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput))
-            and req.mm_inputs
-        ):
-            for item in req.mm_inputs.mm_items:
-                if _feature_has_shm(item.feature):
-                    return True
-                if _feature_has_shm(item.precomputed_embeddings):
-                    return True
+            continue
+        for item in _mm_items_of(req) or ():
+            if _feature_has_shm(item.feature):
+                return True
+            if _feature_has_shm(item.precomputed_embeddings):
+                return True
     return False
 
 
@@ -1520,12 +1535,7 @@ def discard_shm_features(obj) -> None:
         for sub_obj in obj.batch:
             discard_shm_features(sub_obj)
         return
-    if not isinstance(obj, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)):
-        return
-    mm_inputs = obj.mm_inputs
-    if mm_inputs is None or not hasattr(mm_inputs, "mm_items"):
-        return
-    for item in mm_inputs.mm_items:
+    for item in _mm_items_of(obj) or ():
         _discard_tensor_or_list(item.feature)
         _discard_tensor_or_list(item.precomputed_embeddings)
 
@@ -1554,16 +1564,12 @@ def unwrap_shm_features(obj):
         for sub_obj in obj.batch:
             unwrap_shm_features(sub_obj)
         return obj
-    # Handle single requests
-    if (
-        isinstance(obj, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput))
-        and obj.mm_inputs
-    ):
-        for item in obj.mm_inputs.mm_items:
-            if item.feature is not None:
-                item.feature = _unwrap_tensor_or_list(item.feature)
-            if item.precomputed_embeddings is not None:
-                item.precomputed_embeddings = _unwrap_tensor_or_list(
-                    item.precomputed_embeddings
-                )
+    # Handle single requests (an MMInputsProcessError marker has no items)
+    for item in _mm_items_of(obj) or ():
+        if item.feature is not None:
+            item.feature = _unwrap_tensor_or_list(item.feature)
+        if item.precomputed_embeddings is not None:
+            item.precomputed_embeddings = _unwrap_tensor_or_list(
+                item.precomputed_embeddings
+            )
     return obj

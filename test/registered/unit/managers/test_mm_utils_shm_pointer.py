@@ -14,17 +14,28 @@ No server / GPU / weight loading involved.
 
 import pickle
 import unittest
+from http import HTTPStatus
+from multiprocessing import shared_memory
+from types import SimpleNamespace
+from unittest import mock
 
 import msgspec
-from multiprocessing import shared_memory
-
 import torch
 
-from sglang.srt.managers.io_struct import TokenizedGenerateReqInput
+from sglang.srt.managers.io_struct import (
+    BatchTokenizedGenerateReqInput,
+    MMInputsProcessError,
+    TokenizedGenerateReqInput,
+)
+from sglang.srt.managers.schedule_batch import FINISH_ABORT, MultimodalInputs
+from sglang.srt.managers.scheduler import Scheduler
+from sglang.srt.sampling.sampling_params import SamplingParams
+from sglang.srt.session.session_controller import Session
 from sglang.srt.managers.mm_utils import (
     ShmPointerMMData,
     discard_shm_features,
     has_shm_features,
+    unwrap_shm_features,
 )
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -92,7 +103,7 @@ class TestShmPointerMMData(CustomTestCase):
             offsets=[(0, 2), (2, 4)],
             feature=feats,
         )
-        req = _tokenized_req(mm_inputs=_FakeMMInputs([item]))
+        req = _tokenized_req(mm_inputs=MultimodalInputs(mm_items=[item]))
         self.assertTrue(has_shm_features([req]))
         names = [f.shm_name for f in feats]
         discard_shm_features(req)
@@ -110,11 +121,73 @@ def _tokenized_req(**overrides) -> TokenizedGenerateReqInput:
     return TokenizedGenerateReqInput(**kwargs)
 
 
-class _FakeMMInputs:
-    """Minimal stand-in exposing ``mm_items`` like MultimodalProcessorOutput."""
+class TestMarkerConsumers(CustomTestCase):
+    """The MMInputsProcessError marker planted by the request receiver reaches
+    other consumers of mm_inputs: the SHM helpers on the next pipeline stage,
+    session continuation (BOS strip), and the scheduler's request handlers.
+    None of them may raise; the scheduler must reject before session handling."""
 
-    def __init__(self, mm_items):
-        self.mm_items = mm_items
+    def _marker_req(self, **overrides):
+        return _tokenized_req(
+            input_ids=[1, 2],
+            mm_inputs=MMInputsProcessError(message="lost segment"),
+            **overrides,
+        )
+
+    def test_shm_helpers_tolerate_the_marker(self):
+        req = self._marker_req()
+        self.assertFalse(has_shm_features([req]))  # next PP stage's detection
+        with mock.patch("sglang.srt.managers.mm_utils._get_is_default_transport", return_value=False), mock.patch(
+            "sglang.srt.managers.mm_utils.get_serving", return_value=SimpleNamespace(skip_tokenizer_init=False)
+        ):
+            self.assertIs(unwrap_shm_features(req), req)
+        discard_shm_features(req)  # must not raise
+        self.assertIsInstance(req.mm_inputs, MMInputsProcessError)  # rejection semantics kept
+        batch = BatchTokenizedGenerateReqInput(batch=[req])
+        self.assertFalse(has_shm_features([batch]))
+        discard_shm_features(batch)
+
+    def test_session_bos_strip_tolerates_the_marker(self):
+        req = self._marker_req()
+        Session._strip_bos_token(req, SimpleNamespace(bos_token_id=1))
+        self.assertEqual(list(req.input_ids), [2])
+        self.assertIsInstance(req.mm_inputs, MMInputsProcessError)
+
+    def test_scheduler_rejects_marker_before_session_processing(self):
+        queued = []
+        session_touched = []
+
+        class _Sessions:  # any session lookup would be a bug
+            def __contains__(self, key):
+                session_touched.append(key)
+                return False
+
+        stub = SimpleNamespace(
+            model_config=SimpleNamespace(vocab_size=32),
+            tokenizer=None,
+            session_controller=_Sessions(),
+            init_req_max_new_tokens=lambda req: None,
+            _add_request_to_queue=lambda req, is_retracted=False: queued.append(req),
+        )
+        req = self._marker_req(
+            session_params=SimpleNamespace(id="s1"),
+            sampling_params=SamplingParams(max_new_tokens=4),
+        )
+        with mock.patch(
+            "sglang.srt.managers.schedule_batch.get_parallel", return_value=SimpleNamespace(tp_rank=0)
+        ):
+            self.assertTrue(Scheduler._reject_mm_transport_failure(stub, req))
+        self.assertEqual(len(queued), 1)
+        fin = queued[0].to_finish
+        self.assertIsInstance(fin, FINISH_ABORT)
+        self.assertEqual(fin.status_code, HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.assertEqual(fin.err_type, "InternalServerError")
+        self.assertIn("lost segment", fin.message)
+        self.assertEqual(session_touched, [])
+        # a healthy request is not touched by the guard
+        self.assertFalse(
+            Scheduler._reject_mm_transport_failure(stub, _tokenized_req(input_ids=[1, 2], mm_inputs=None))
+        )
 
 
 if __name__ == "__main__":
