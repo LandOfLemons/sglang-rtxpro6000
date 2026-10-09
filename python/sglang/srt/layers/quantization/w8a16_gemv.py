@@ -9,8 +9,10 @@
 # `_store_split`, `_w8a16_gemv_kernel`, the plan/fit tables, the scratch slots and
 # `w8a16_gemv` are the donor's, byte for byte (PDL included). The deviations are:
 #   * the callers this base does not have are not carried: the fused gated-RMSNorm
-#     prologue, the fused gate_up+SiLU kernel and `bf16_gemv` (+ its scale-of-one),
-#     so some donor comments name callers that do not exist here;
+#     prologue and the fused gate_up+SiLU kernel, so some donor comments name
+#     callers that do not exist here.  `bf16_gemv` (+ its scale-of-one) is carried
+#     for the draft MTP entry fusion (`models/qwen4_exp_mtp.py`,
+#     SGLANG_MTP_FC_GEMV, donor qwen4_exp_mtp.py:32/280/331 @5105985).
 #   * `_workspace_slot` raises instead of silently allocating during a capture;
 #   * `prealloc`'s documented caller is this fork's rowwise-FP8 output heads
 #     (`sglang.kernels.ops.gemm.sm120_online_fp8`), not `Fp8LinearMethod`.
@@ -348,6 +350,8 @@ _WS_FLOATS = 1 << 21
 _WS_COUNTERS = 4096
 _MAX_SPLITS = 32
 _WS = {}
+# The scalar "scale" bf16_gemv passes for its (unquantized) weights.
+_ONES = {}
 
 
 # Split-K scratch slots. The decode path issues most linears on one stream, but the
@@ -407,13 +411,15 @@ def prealloc(device) -> None:
     """Materialize the per-device scratch before any CUDA graph is captured.
 
     Warm-up runs at prefill widths, where every caller falls back to cuBLAS, so
-    without this the split-K scratch would first be allocated inside a capture
-    and would live in that graph's private memory pool. Called from
-    ``sglang.kernels.ops.gemm.sm120_online_fp8`` when the rowwise-FP8 output
-    heads are installed.
+    without this the split-K scratch (and ``bf16_gemv``'s scale-of-one) would
+    first be allocated inside a capture and would live in that graph's private
+    memory pool. Called from ``sglang.kernels.ops.gemm.sm120_online_fp8`` when
+    the rowwise-FP8 output heads are installed.
     """
     for slot in range(_N_SLOTS):
         _workspace_slot(device, slot)
+    if device not in _ONES:
+        _ONES[device] = torch.ones(1, dtype=torch.float32, device=device)
 
 
 _NUM_SMS = None
@@ -691,4 +697,31 @@ def w8a16_gemv(
     if cfg is None:
         cfg = _plan(M, N, K, w.stride(0) == 1, w.element_size(), _num_sms(x.device))
     _launch(x, w, s, y, M, N, K, s.numel() > 1, cfg, y2, split_n)
+    return y if y2 is None else (y, y2)
+
+
+def bf16_gemv(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    cfg=None,
+    out: Optional[torch.Tensor] = None,
+    out2: Optional[torch.Tensor] = None,
+    split_n: int = 0,
+):
+    """Skinny BF16 GEMM y = x @ w^T for tiny-N linears where cuBLAS picks a poor kernel.
+
+    Donor ``w8a16_gemv.py:826`` @5105985116eb (Apache-2.0), byte for byte.
+    x: [M,K] bf16 (M<=16); w: [N,K] bf16. ``out2``/``split_n``: see w8a16_gemv.
+    """
+    M, K = x.shape
+    N = w.shape[0]
+    assert w.shape[1] == K and M <= 16
+    y, y2, split_n = _split_dests(out, out2, split_n, M, N, x.device)
+    one = _ONES.get(x.device)
+    if one is None:
+        one = torch.ones(1, dtype=torch.float32, device=x.device)
+        _ONES[x.device] = one
+    if cfg is None:
+        cfg = _plan(M, N, K, w.stride(0) == 1, w.element_size(), _num_sms(x.device))
+    _launch(x, w, one, y, M, N, K, False, cfg, y2, split_n)
     return y if y2 is None else (y, y2)
