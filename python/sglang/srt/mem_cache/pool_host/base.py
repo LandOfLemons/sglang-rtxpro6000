@@ -222,6 +222,8 @@ class HostKVCache(abc.ABC):
             return
         self._destroyed = True
         buffers = getattr(self, "kv_buffer", None)
+        # torch cudaHostAlloc'd buffers are unpinned by torch's pinned-memory
+        # pool; cudaHostUnregister on them would only log spurious failures.
         if (
             buffers is not None
             and self.pin_memory

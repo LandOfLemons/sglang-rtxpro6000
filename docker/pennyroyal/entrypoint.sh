@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export REPO_ROOT=/opt/pennyroyal
+# REPO_ROOT stays /opt/pennyroyal in the image; honouring a preloaded value is
+# what lets the CPU handoff test exercise this exec path against a stand-in
+# image root instead of a copy of these six lines.
+export REPO_ROOT="${REPO_ROOT:-/opt/pennyroyal}"
 export SGLANG_EXE="$REPO_ROOT/.venv/bin/sglang"
 export PYTHON="$REPO_ROOT/.venv/bin/python"
 export PYTHONPATH="$REPO_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
 export CACHE_BASE="${CACHE_BASE:-/cache}"
 export NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:-/nixl}"
 export PENNY_PLE_PLUGIN_DIR="$REPO_ROOT/.ple-nvme"
+
+# Compose forwards optional knobs with empty defaults; an empty passthrough
+# must behave exactly like an unset variable (qualified defaults, untouched
+# NCCL env), so normalize them away before the recipes read them.
+for optional in PENNY_REASONING_EFFORT TP_SIZE NCCL_P2P_DISABLE; do
+  if [[ -z ${!optional:-} ]]; then unset "$optional"; fi
+done
 
 profile="${1:-next}"
 if (( $# )); then shift; fi

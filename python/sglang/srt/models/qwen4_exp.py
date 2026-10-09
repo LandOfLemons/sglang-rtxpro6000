@@ -1,6 +1,7 @@
 """Inference-only Qwen4-Exp (text + VL) on the Qwen3.5 backbone."""
 
 import math
+import mmap
 from contextlib import nullcontext
 from typing import Any, Iterable, Optional, Set, Tuple
 
@@ -488,20 +489,31 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             and get_attention_dp_size() > 1
             and not self.use_attn_tp_ngram
         )
-        self.ngram_embedding = VocabParallelEmbedding(
-            padded_vocab_size,
-            self.head_dim_per_ngram,
-            params_dtype=(
-                torch.float8_e4m3fn
-                if (quant_config is not None and quant_config.get_name() == "fp8")
-                or getattr(config, "ple_embedding_dtype", None) == "float8_e4m3fn"
-                else torch.bfloat16
-            ),
-            output_dtype=torch.bfloat16,
-            use_attn_tp_group=self.use_attn_tp_ngram,
-        )
-        self.ngram_embedding.register_buffer(
+        offload_embedding = bool(config.ple_offload_embedding)
+        # The offloaded table is consumed for its metadata only, so build the
+        # template on meta: the pinned host table becomes its first and only
+        # allocation instead of a transient per-rank device shard (sgl-project/sglang#39841).
+        with torch.device("meta") if offload_embedding else nullcontext():
+            ngram_embedding = VocabParallelEmbedding(
+                padded_vocab_size,
+                self.head_dim_per_ngram,
+                params_dtype=(
+                    torch.float8_e4m3fn
+                    if (quant_config is not None and quant_config.get_name() == "fp8")
+                    or getattr(config, "ple_embedding_dtype", None) == "float8_e4m3fn"
+                    else torch.bfloat16
+                ),
+                output_dtype=torch.bfloat16,
+                use_attn_tp_group=self.use_attn_tp_ngram,
+            )
+        # The scale is tiny; keep it on the real device with the model.
+        ngram_embedding.register_buffer(
             "weight_scale", torch.ones(1, dtype=torch.bfloat16), persistent=True
+        )
+        self.ngram_embedding = (
+            Qwen4ExpPinnedHostEmbedding(ngram_embedding)
+            if offload_embedding
+            else ngram_embedding
         )
 
     @classmethod
@@ -750,11 +762,49 @@ def _gather_ple_embedding_from_pinned_kernel(
     )
 
 
+# Pinned PLE tables live as long as the process (like the model weights), so
+# their mappings stay registered here and are never unmapped.
+_PINNED_TABLE_BUFFERS: list = []
+_CUDA_HOST_REGISTER_PORTABLE_MAPPED = 0x01 | 0x02
+
+
+def _allocate_pinned_table(shape: Tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    """Page-locked host tensor that locks exactly ``shape``/``dtype`` bytes.
+
+    ``torch.empty(..., pin_memory=True)`` goes through the caching host
+    allocator, which rounds the request up to the next power of two; the
+    47.68 GiB fp8 Flash-Next table would lock 64 GiB (a bf16 table 128 GiB)
+    of unreclaimable host memory (sgl-project/sglang#40626). Map anonymous
+    memory of the exact size and register it with CUDA instead; the result is
+    pinned and device-accessible through the same host-pointer semantics the
+    Triton gathers already rely on.
+    """
+    shape = tuple(int(d) for d in shape)
+    nbytes = math.prod(shape) * torch.empty(0, dtype=dtype).element_size()
+    if nbytes == 0:
+        return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+    buf = mmap.mmap(-1, nbytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    raw = torch.frombuffer(buf, dtype=torch.uint8)
+    try:
+        err = torch.cuda.cudart().cudaHostRegister(
+            raw.data_ptr(), nbytes, _CUDA_HOST_REGISTER_PORTABLE_MAPPED
+        )
+        if int(err) != 0:
+            raise RuntimeError(f"cudaHostRegister failed: {err}")
+    except Exception:
+        buf.close()
+        raise
+    _PINNED_TABLE_BUFFERS.append(buf)
+    return raw.view(dtype).view(shape)
+
+
 class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
     """PLE table read directly from pinned host memory.
 
     The table stays in its checkpoint storage dtype (fp8 with a per-tensor
     weight_scale for fp8 checkpoints, bf16 otherwise); gathers emit bf16.
+
+    The source weight may be on the meta device; only its metadata is used.
     """
 
     _COPIED_ATTRIBUTES = (
@@ -798,21 +848,23 @@ class Qwen4ExpPinnedHostEmbedding(VocabParallelEmbedding):
         self.quant_method = None
 
         source_weight = embedding.weight
-        cpu_weight = nn.Parameter(
-            torch.empty(
-                source_weight.shape,
-                dtype=source_weight.dtype,
-                device="cpu",
-                pin_memory=True,
-            ),
-            requires_grad=False,
-        )
+        try:
+            cpu_weight = nn.Parameter(
+                _allocate_pinned_table(source_weight.shape, source_weight.dtype),
+                requires_grad=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "unable to page-lock the PLE host table "
+                f"{tuple(source_weight.shape)}/{source_weight.dtype}: {exc}"
+            ) from exc
         for name, value in vars(source_weight).items():
             setattr(cpu_weight, name, value)
         cpu_weight.weight_loader = self.weight_loader
         self.register_parameter("weight", cpu_weight)
         # The scale is tiny; keep it with the model instead of offloading it
-        # with the table.
+        # with the table. The template always registers it outside the meta
+        # construction, so it carries real values already.
         self.register_buffer("weight_scale", embedding.weight_scale, persistent=True)
         del embedding.weight
         self._block_d = triton.next_power_of_2(self.embedding_dim)
@@ -894,10 +946,6 @@ class Qwen4ExpPLELayer(nn.Module):
             ple_layer_index=ple_layer_index,
             quant_config=quant_config,
         )
-        if config.ple_offload_embedding:
-            self.ple_embedding.ngram_embedding = Qwen4ExpPinnedHostEmbedding(
-                self.ple_embedding.ngram_embedding
-            )
         self.short_conv_dilation = self.ple_embedding.ngram_size
         self.short_conv_state_len = (
             self.conv_kernel_size - 1
@@ -1275,7 +1323,7 @@ class Qwen4ExpPLELayer(nn.Module):
         return _pad_token_rows(output, batch.physical_tokens)
 
 
-_ONLINE_MXFP8_LOGGED_SIGNATURES = set()
+_ONLINE_ROWWISE_FP8_LOGGED_SIGNATURES = set()
 
 
 class Qwen4ExpLayerExtensionMixin:
@@ -1337,10 +1385,19 @@ class Qwen4ExpLayerExtensionMixin:
         self._maybe_convert_linears_to_mxfp8()
 
     def _maybe_convert_linears_to_mxfp8(self) -> None:
-        """Convert only Flash-Next's eligible, otherwise-unquantized linears."""
+        """Convert only Flash-Next's eligible, otherwise-unquantized linears.
+
+        Selected representation: donor-compatible weight-only FP8 -- E4M3
+        weights with one FP32 scale per output channel, quantized once from
+        the original BF16 checkpoint values during the standard
+        ``Fp8LinearMethod`` (non-serialized) load lifecycle. No BF16 resident
+        copy, no second format, no requantization of other formats.
+        """
         from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+            _W8A16_GEMV_DONOR_MAX_M,
             convert_eligible_linears_to_mxfp8,
             online_fp8_enabled,
+            w8a16_gemv_enabled,
         )
 
         if not online_fp8_enabled():
@@ -1351,45 +1408,187 @@ class Qwen4ExpLayerExtensionMixin:
         from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 
         def build_method():
-            class CheckedOnlineMxfp8LinearMethod(Fp8LinearMethod):
+            class CheckedOnlineRowwiseFp8LinearMethod(Fp8LinearMethod):
+                """Rowwise (per-output-channel) online FP8 for this candidate.
+
+                Deliberately NOT ``block_quant``/MXFP8: the config leaves
+                ``weight_block_size=None``/``use_mxfp8=False``, so the existing
+                non-serialized ``Fp8LinearMethod`` postprocess quantizes the
+                loaded BF16 weight with ``per_token_group_quant_fp8`` over the
+                whole row -- one FP32 scale per output channel -- and stores
+                the standard resident ``weight`` [K, N] (transposed view of the
+                [N, K] FP8 storage) plus ``weight_scale`` [N]. GEMMs keep the
+                tested ``apply_fp8_linear`` dispatch. On top of that base this
+                subclass binds the donor W8A16 GEMV + gated-norm fusion to
+                *these* modules only, so generic (e.g. 27B FP8-checkpoint)
+                ``Fp8LinearMethod`` users are untouched.
+                """
+
                 def process_weights_after_loading(self, module) -> None:
+                    # Fail loud BEFORE the base postprocess mutates anything:
+                    # this candidate quantizes the original checkpoint BF16
+                    # exactly once per load. A repeat postprocess would feed
+                    # the resident FP8 back through the quantizer (silently
+                    # requantizing it and re-interpreting the [K, N] stored
+                    # view as [N, K]), and a non-BF16 weight never came from
+                    # the checkpoint load this conversion is scoped to.
+                    weight = getattr(module, "weight", None)
+                    if (
+                        not isinstance(weight, torch.Tensor)
+                        or weight.dim() != 2
+                        or weight.dtype != torch.bfloat16
+                    ):
+                        raise RuntimeError(
+                            "Flash-Next online rowwise FP8 expects the original "
+                            "2-D BF16 checkpoint weight before post-processing; "
+                            f"got dtype={getattr(weight, 'dtype', None)} "
+                            f"shape={tuple(getattr(weight, 'shape', ()))} for "
+                            f"{type(module).__name__} (already quantized, or an "
+                            "unexpected load path -- refusing to requantize)"
+                        )
                     super().process_weights_after_loading(module)
-                    scale = getattr(module, "weight_scale_inv", None)
+                    scale = getattr(module, "weight_scale", None)
                     if (
                         module.weight.dtype != torch.float8_e4m3fn
                         or scale is None
-                        or scale.dtype != torch.uint8
-                        or not getattr(scale, "format_ue8m0", False)
+                        or scale.dtype != torch.float32
+                        # weight is stored [K, N]; per-channel == one scale
+                        # per output channel.
+                        or scale.numel() != module.weight.shape[1]
                     ):
                         raise RuntimeError(
-                            "Flash-Next online MXFP8 post-processing produced "
-                            f"invalid weight/scale state for {type(module).__name__}"
+                            "Flash-Next online rowwise-FP8 post-processing "
+                            f"produced invalid weight/scale state for "
+                            f"{type(module).__name__}"
                         )
+                    if w8a16_gemv_enabled():
+                        # Materialize the GEMV's split-K scratch now, before
+                        # any CUDA graph is captured (donor fp8.py:969-979).
+                        from sglang.srt.layers.quantization.w8a16_gemv import (
+                            prealloc,
+                        )
+
+                        prealloc(module.weight.device)
                     signature = (
                         type(module).__name__,
                         tuple(module.weight.shape),
-                        str(self.mxfp8_dense_backend),
+                        module.weight.dtype,
                     )
-                    if signature not in _ONLINE_MXFP8_LOGGED_SIGNATURES:
-                        _ONLINE_MXFP8_LOGGED_SIGNATURES.add(signature)
+                    if signature not in _ONLINE_ROWWISE_FP8_LOGGED_SIGNATURES:
+                        _ONLINE_ROWWISE_FP8_LOGGED_SIGNATURES.add(signature)
                         logger.info(
-                            "Flash-Next online MXFP8 projection ready: "
-                            "module=%s shape=%s backend=%s scale=UE8M0",
+                            "Flash-Next online rowwise FP8 projection ready: "
+                            "module=%s weight(K,N)=%s dtype=%s "
+                            "scale=per-output-channel-fp32",
                             *signature,
                         )
 
-            method = CheckedOnlineMxfp8LinearMethod(
+                def _w8a16_gemv_ok(self, layer, x) -> bool:
+                    """Whether ``apply`` would route this call through the GEMV.
+
+                    Donor ``Fp8LinearMethod._w8a16_gemv_ok`` (fp8.py:986
+                    @5105985116eb) adapted to this fork's selection contract:
+                    the ``SGLANG_FP8_W8A16_GEMV`` tri-state (automatic under
+                    the eligible default selection; saved true/false private) and the
+                    ``SGLANG_FP8_W8A16_GEMV_MAX_M`` budget (which the kernel
+                    module caps at the donor's M <= 16), and the exact-SM120
+                    gate of the online-FP8 feature (installation already
+                    requires it; tensors must be on the weight's device).
+                    """
+                    return (
+                        w8a16_gemv_enabled()
+                        and online_fp8_enabled()
+                        and not self.use_marlin
+                        and not self.block_quant
+                        and not self.use_mxfp8
+                        # this fork can hand apply() a (fp8, scale) tuple from
+                        # a fused quant producer; the donor runtime never did.
+                        and isinstance(x, torch.Tensor)
+                        and x.dim() == 2
+                        and 1
+                        <= x.shape[0]
+                        <= min(
+                            envs.SGLANG_FP8_W8A16_GEMV_MAX_M.get(),
+                            _W8A16_GEMV_DONOR_MAX_M,
+                        )
+                        and x.dtype == torch.bfloat16
+                        and x.device == layer.weight.device
+                        and layer.weight.dtype == torch.float8_e4m3fn
+                        and layer.weight_scale.numel() == layer.weight.shape[1]
+                    )
+
+                def apply(self, layer, x, bias=None):
+                    if self._w8a16_gemv_ok(layer, x):
+                        from sglang.srt.layers.quantization.w8a16_gemv import (
+                            w8a16_gemv,
+                        )
+
+                        y = w8a16_gemv(x, layer.weight.t(), layer.weight_scale)
+                        if bias is not None:
+                            y = y + bias
+                        return y
+                    # Larger M (e.g. the C6 target's 24-row verification),
+                    # non-bf16/tuple activations and any other contract miss:
+                    # the resident rowwise FP8 weight through the standard
+                    # apply_fp8_linear dispatch -- never a GEMV past its row
+                    # budget, never a BF16 dequantization cache.
+                    return super().apply(layer, x, bias=bias)
+
+                def apply_norm_gated(
+                    self,
+                    layer,
+                    x,
+                    z,
+                    norm_weight,
+                    group_size,
+                    eps,
+                    sigmoid_gate=False,
+                    bias=None,
+                ):
+                    """``apply`` with a gated RMSNorm over ``x`` folded into the
+                    GEMV's A-load, or None when the call cannot take that path.
+
+                    Donor ``Fp8LinearMethod.apply_norm_gated`` (fp8.py:1031
+                    @5105985116eb), verbatim contract: computes
+                    ``apply(layer, rms_norm_gated(x, z))`` -- each contiguous
+                    ``group_size`` slice of an ``x`` row is one RMS group,
+                    normalised, scaled by ``norm_weight``, gated by
+                    ``silu(z)`` (or ``sigmoid(z)``) and rounded to bf16 before
+                    the same k-loop consumes it. Numerics: the fp32 sum of
+                    squares is re-associated into the GEMV tile's thread
+                    layout, so the pre-round value can differ in the last fp32
+                    bit; after the bf16 round the result is within 1 ulp.
+                    """
+                    if bias is not None or not self._w8a16_gemv_ok(layer, x):
+                        return None
+                    from sglang.srt.layers.quantization.w8a16_gemv import (
+                        w8a16_gemv_norm_gated,
+                        w8a16_gemv_norm_gated_supported,
+                    )
+
+                    w = layer.weight.t()
+                    if not w8a16_gemv_norm_gated_supported(
+                        x, w, layer.weight_scale, z, norm_weight, group_size
+                    ):
+                        return None
+                    return w8a16_gemv_norm_gated(
+                        x,
+                        w,
+                        layer.weight_scale,
+                        z,
+                        norm_weight,
+                        group_size,
+                        eps,
+                        sigmoid_gate,
+                    )
+
+            method = CheckedOnlineRowwiseFp8LinearMethod(
                 Fp8Config(
                     is_checkpoint_fp8_serialized=False,
                     activation_scheme="dynamic",
-                    use_mxfp8=True,
                 )
             )
-            if method.mxfp8_dense_backend.is_unsupported():
-                raise RuntimeError(
-                    "SGLANG_SM120_ONLINE_MXFP8 was selected but no MXFP8 dense "
-                    "kernel is available"
-                )
+            assert not method.block_quant and not method.use_mxfp8
             return method
 
         self._online_mxfp8_linears = convert_eligible_linears_to_mxfp8(
@@ -1605,12 +1804,21 @@ class Qwen4ExpAttentionDecoderLayer(
         indexer_metadata = get_qsa_indexer_metadata(
             backend, self.layer_id, forward_batch
         )
+        diagnostics = getattr(sparse_backend, "qsa_stall_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.set_phase(self.layer_id, "before_indexer")
+        tracked = diagnostics is not None and diagnostics.is_tracking(self.layer_id)
+        if tracked:
+            diagnostics.mark_stage(self.layer_id, "before_indexer")
         topk_indices = self.indexer(
             hidden_states,
             positions,
             forward_batch,
             indexer_metadata,
+            **({"stall_diagnostics": diagnostics} if tracked else {}),
         )
+        if diagnostics is not None:
+            diagnostics.mark_indexer_enqueued(self.layer_id)
         should_capture = getattr(
             sparse_backend, "should_capture_mtp_sparse_indices", None
         )
@@ -1621,6 +1829,32 @@ class Qwen4ExpAttentionDecoderLayer(
         return topk_indices
 
     def self_attention(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+    ) -> torch.Tensor:
+        if self.is_qsa:
+            from sglang.srt.layers.attention.qsa.glue import (
+                resolve_qsa_sparse_backend,
+            )
+
+            sparse_backend = resolve_qsa_sparse_backend(get_attn_backend())
+            diagnostics = getattr(sparse_backend, "qsa_stall_diagnostics", None)
+            if diagnostics is not None:
+                with diagnostics.track(
+                    layer_id=self.layer_id,
+                    hidden_states=hidden_states,
+                    forward_batch=forward_batch,
+                ) as tracked:
+                    if tracked:
+                        diagnostics.mark_stage(self.layer_id, "layer_entry")
+                    return self._self_attention_impl(
+                        positions, hidden_states, forward_batch
+                    )
+        return self._self_attention_impl(positions, hidden_states, forward_batch)
+
+    def _self_attention_impl(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,

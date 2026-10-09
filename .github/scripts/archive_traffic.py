@@ -292,6 +292,7 @@ def render(history, raw, snapshot_path, current_metrics=None):
     metrics_link = ' · [Repository stars and forks](repository-metrics.json)' if current_metrics is not None else ''
     lines += ['', f'[Latest full snapshot]({snapshot_path}) · [Daily JSON](daily.json){metrics_link} · '
               '[GHCR package downloads](PACKAGE-DOWNLOADS.md) · '
+              '[Hugging Face model downloads](HUGGINGFACE-DOWNLOADS.md) · '
               '[Immutable first-run raw responses](raw/first-run/)', '',
               'Snapshots retain the aggregate totals, daily arrays, referrers and popular paths as '
               'reported together in each collection. They overlap and must not be added together.', '',

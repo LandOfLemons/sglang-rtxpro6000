@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # Flash-Next FR-Spec with 524K context and HiCache/NIXL.
+#
+# Disk tier: on (the qualified default) adds the NIXL FILE backend under
+# $NIXL_STORAGE_BASE. off keeps the GPU radix cache and the host-RAM HiCache
+# tier and drops only the disk tier: no NIXL root, config, namespace
+# derivation or storage-backend arguments.
+NIXL="${NIXL:-on}"
+case "$NIXL" in
+  on|off) ;;
+  *) echo "NIXL must be on or off; got '$NIXL'" >&2; exit 1 ;;
+esac
 # Source credit: https://github.com/gabrielolympie/sglang-flashnext-sm120
 set -euo pipefail
 # Avoid synchronous RAM compaction for transient NumPy image arrays.
@@ -12,6 +22,18 @@ case "$SGLANG_MM_PREPROCESS_DEVICE" in
   cuda:*) IMAGE_PROCESSOR_BACKEND=torchvision ;;
   *) echo "Choose SGLANG_MM_PREPROCESS_DEVICE=cpu or cuda:N" >&2; exit 1 ;;
 esac
+# Accepted FlashInfer GDN fix: run the patched SM12x delta-rule prefill kernels
+# in FP16-accumulate MMA mode. This is the qualified default of the Flash-Next
+# profiles, exported before Python imports FlashInfer. Change it to 0 (or export
+# 0 before launch) to opt out; FlashInfer's own default stays off and the
+# 27B/DFlash2 recipe never sets it.
+export FLASHINFER_GDN_FP16_ACCUM_MMA="${FLASHINFER_GDN_FP16_ACCUM_MMA:-1}"
+
+# The mode changes the GDN computation, so it is cache identity: the resolved
+# value (not the raw string) goes into the NIXL namespace fields below, and
+# anything but the literal 1 is the released FP32-accumulate representation.
+GDN_FP16_ACCUM_MMA=off
+if [[ "$FLASHINFER_GDN_FP16_ACCUM_MMA" == 1 ]]; then GDN_FP16_ACCUM_MMA=on; fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
@@ -19,11 +41,23 @@ SGLANG_EXE="${SGLANG_EXE:-$REPO_ROOT/.venv/bin/sglang}"
 PYTHON="${PYTHON:-$(dirname "$SGLANG_EXE")/python}"
 TARGET_MODEL="${TARGET_MODEL:?Set TARGET_MODEL to the Flash-Next checkpoint}"
 CACHE_BASE="${CACHE_BASE:?Set CACHE_BASE to the durable compiler-cache root}"
-NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache root}"
-NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix-frspec.toml}"
+if [[ "$NIXL" == on ]]; then
+  NIXL_STORAGE_BASE="${NIXL_STORAGE_BASE:?Set NIXL_STORAGE_BASE to the FILE cache root}"
+  NIXL_CONFIG="${NIXL_CONFIG:-$SCRIPT_DIR/nixl-posix-frspec.toml}"
+fi
 NAMESPACE_HELPER="$REPO_ROOT/scripts/pennyroyal/derive_namespace.py"
+# Host-RAM HiCache tier: --hicache-size counts decimal GB (SGLang sizes the
+# host pool at size * 1e9 bytes), not GiB. An unset PENNY_HICACHE_SIZE_GB keeps
+# this recipe's qualified default; a chosen value must be a positive integer.
+HICACHE_SIZE_GB="${PENNY_HICACHE_SIZE_GB:-32}"
+if [[ ! "$HICACHE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
+  echo "PENNY_HICACHE_SIZE_GB must be a positive integer number of GB, got '$HICACHE_SIZE_GB'" >&2
+  exit 1
+fi
 source "$SCRIPT_DIR/chat-template.sh"
 source "$SCRIPT_DIR/request-capacity.sh"
+source "$SCRIPT_DIR/reasoning-effort.sh"
+source "$SCRIPT_DIR/tp-devices.sh"
 
 # Pin the qualified map and tokenizer: a different ID mapping changes draft
 # proposals and must never silently reuse this representation's cache namespace.
@@ -31,17 +65,31 @@ TOKEN_MAP="$SCRIPT_DIR/frspec/flash-next-64k.pt"
 
 CONTEXT_LENGTH=524288
 PAGE_SIZE=64
-TP_SIZE=1
+# TP1 is the qualified default; TP_SIZE=2 opts into the two-GPU experimental
+# (not yet hardware-qualified) path: the NIXL namespace hashes tp_size, so
+# the two topologies can never share one cache root, and the FR-Spec
+# hot-vocab head is assembled across TP shards at startup (see
+# python/sglang/srt/speculative/hot_vocab.py).
+TP_SIZE="${TP_SIZE:-1}"
+if [[ ! "$TP_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "TP_SIZE must be a positive integer" >&2
+  exit 1
+fi
 COMPUTE_DTYPE=bfloat16
 KV_DTYPE=fp8_e4m3
 MAMBA_SSM_DTYPE=bfloat16
 MAMBA_CONV_DTYPE=bfloat16
 MAMBA_TRACK_INTERVAL=64
 PREFILL_CHUNK_SIZE=4096
-for path in "$SGLANG_EXE" "$PYTHON" "$NAMESPACE_HELPER"; do
+for path in "$SGLANG_EXE" "$PYTHON"; do
   [[ -x "$path" ]] || { echo "Required executable missing: $path" >&2; exit 1; }
 done
-[[ -r "$NIXL_CONFIG" ]] || { echo "NIXL config missing: $NIXL_CONFIG" >&2; exit 1; }
+if [[ "$NIXL" == on ]]; then
+  [[ -x "$NAMESPACE_HELPER" ]] || { echo "Namespace helper missing: $NAMESPACE_HELPER" >&2; exit 1; }
+fi
+if [[ "$NIXL" == on ]]; then
+  [[ -r "$NIXL_CONFIG" ]] || { echo "NIXL config missing: $NIXL_CONFIG" >&2; exit 1; }
+fi
 [[ -f "$TARGET_MODEL/config.json" && -f "$TARGET_MODEL/model.safetensors.index.json" ]] || {
   echo "Incomplete target checkpoint: $TARGET_MODEL" >&2
   exit 1
@@ -52,9 +100,16 @@ done
 }
 [[ -f "$TOKEN_MAP" ]] || { echo "FR-Spec map missing: $TOKEN_MAP" >&2; exit 1; }
 mkdir -p "$CACHE_BASE"/{huggingface,torch,torchinductor,triton,cuda,flashinfer,sglang/jit}
-mkdir -p "$NIXL_STORAGE_BASE"
+if [[ "$NIXL" == on ]]; then
+  mkdir -p "$NIXL_STORAGE_BASE"
+fi
 
-export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# Default to as many consecutive GPUs as TP requires (one scheduler process
+# per visible device); an explicit CUDA_VISIBLE_DEVICES still wins.
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((TP_SIZE - 1)))"
+fi
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDACXX="${CUDACXX:-$CUDA_HOME/bin/nvcc}"
 export CC="${CC:-/usr/bin/gcc-15}" CXX="${CXX:-/usr/bin/g++-15}"
@@ -77,6 +132,13 @@ export SGLANG_MAMBA_CONV_DTYPE="$MAMBA_CONV_DTYPE"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export TOKENIZERS_PARALLELISM=false
 
+# TP selects a topology, it never grants GPUs: refuse to launch when the
+# requested ranks (plus a dedicated cuda:N preprocessor) exceed what is
+# visible, instead of letting NCCL fail or the request be ignored. Runs
+# after the durable cache environment so its $PYTHON probe sees the same
+# cache locations as every later Python invocation.
+pennyroyal_check_tp_devices "$TP_SIZE" "$SGLANG_MM_PREPROCESS_DEVICE"
+
 # NVMe preflight imports Torch, Triton, FlashInfer and SGLang. Activate their
 # durable cache locations before selecting the optional backend.
 source "$SCRIPT_DIR/ple-backend.sh"
@@ -84,7 +146,7 @@ configure_max_total_tokens 824384
 
 TARGET_OVERRIDES='{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}'
 printf 'Pennyroyal profile: Flash-Next FR-Spec\n  runtime: %s\n  target: %s\n  token map: %s\n  cache root: %s\n  NIXL root: %s\n' \
-  "$SGLANG_EXE" "$TARGET_MODEL" "$TOKEN_MAP" "$CACHE_BASE" "$NIXL_STORAGE_BASE"
+  "$SGLANG_EXE" "$TARGET_MODEL" "$TOKEN_MAP" "$CACHE_BASE" "${NIXL_STORAGE_BASE:-none}"
 echo "Verifying the pinned FR-Spec map and tokenizer..."
 read -r TOKEN_MAP_SHA _ < <(sha256sum "$TOKEN_MAP")
 [[ "$TOKEN_MAP_SHA" == becfa41d394b86c26c632bea8f3c6ea64bbb76d7b238d8673c06afae21269f25 ]] || {
@@ -95,49 +157,72 @@ read -r TOKENIZER_SHA _ < <(sha256sum "$TARGET_MODEL/tokenizer.json")
   echo "Target tokenizer differs from the qualified FR-Spec tokenizer" >&2; exit 1;
 }
 SGLANG_REV="$(git -C "$REPO_ROOT" rev-parse --short=10 HEAD)"
-TORCH_VERSION="$("$PYTHON" -c 'import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); print(torch.__version__)')"
+PENNY_IDENTITY_PROBE="$("$PYTHON" -c 'import sys; import torch; from sglang.srt.utils import resolve_mm_preprocess_device; resolve_mm_preprocess_device(); from sglang.kernels.ops.gemm.sm120_online_fp8 import launch_precision; print(torch.__version__); print(launch_precision(sys.argv[1]))' "$TARGET_MODEL")"
+TORCH_VERSION="$(printf '%s\n' "$PENNY_IDENTITY_PROBE" | sed -n 1p)"
+# The namespace must name the EFFECTIVE precision, resolved before derivation
+# through the same eligibility logic the runtime applies: automatic and
+# explicit-on share the rowwise_fp8 identity (the legacy "true" named the old
+# mixed-MXFP8 caches), while off and auto-off keep the untouched-weight
+# identity. A probe that cannot answer falls back to the saved explicit choice.
+ONLINE_FP8_PRECISION="$(printf '%s\n' "$PENNY_IDENTITY_PROBE" | sed -n 2p)"
+case "$ONLINE_FP8_PRECISION" in
+  rowwise_fp8|false) ;;
+  *) if [[ "${SGLANG_SM120_ONLINE_MXFP8:-}" == true ]]; then ONLINE_FP8_PRECISION=rowwise_fp8; else ONLINE_FP8_PRECISION=false; fi ;;
+esac
 echo "Media preprocessing: $SGLANG_MM_PREPROCESS_DEVICE ($IMAGE_PROCESSOR_BACKEND); model GPU: cuda:0"
-echo "Deriving NIXL namespace; checkpoint identity hashing may take time..."
-NIXL_STORAGE="$("$NAMESPACE_HELPER" \
-  --base-root "$NIXL_STORAGE_BASE" \
-  --slug "qwen3_8_flash_next_frspec_524k_nextn_${SGLANG_REV}" \
-  --git-repo "$REPO_ROOT" \
-  --model "target=$TARGET_MODEL" \
-  --field "chat_template_sha256=$CHAT_TEMPLATE_SHA" \
-  --field "image_processor_backend=$IMAGE_PROCESSOR_BACKEND" \
-  --field "mm_preprocess_device=$SGLANG_MM_PREPROCESS_DEVICE" \
-  --field "draft_token_map_sha256=$TOKEN_MAP_SHA" \
-  --field "online_mxfp8=$SGLANG_SM120_ONLINE_MXFP8" \
-  --field "context_length=$CONTEXT_LENGTH" \
-  --field "tp_size=$TP_SIZE" \
-  --field "page_size=$PAGE_SIZE" \
-  --field "compute_dtype=$COMPUTE_DTYPE" \
-  --field "target_kv_dtype=$KV_DTYPE" \
-  --field "speculative_algorithm=NEXTN" \
-  --field "speculative_num_steps=3" \
-  --field "speculative_eagle_topk=1" \
-  --field "speculative_num_draft_tokens=4" \
-  --field "speculative_draft_quantization=unquant" \
-  --field "gdn_mtp_cache_mode=none" \
-  --field "hicache_io_backend=kernel" \
-  --field "hicache_mem_layout=page_first" \
-  --field "mamba_ssm_dtype=$MAMBA_SSM_DTYPE" \
-  --field "mamba_conv_dtype=$MAMBA_CONV_DTYPE" \
-  --field "max_mamba_cache_size=$MAX_MAMBA_CACHE_SIZE" \
-  --field "max_running_requests=$MAX_RUNNING_REQUESTS" \
-  --field "mamba_radix_cache_strategy=extra_buffer" \
-  --field "mamba_track_interval=$MAMBA_TRACK_INTERVAL" \
-  --field "linear_attn_decode_backend=flashinfer" \
-  --field "linear_attn_prefill_backend=flashinfer" \
-  --field "ple_offload_embedding=$PLE_OFFLOAD_EMBEDDING" \
-  "${PLE_NAMESPACE_ARGS[@]}" \
-  --field "qsa_compressed_hicache=true" \
-  --field "chunked_prefill_size=$PREFILL_CHUNK_SIZE" \
-  --field "target_model_overrides=$TARGET_OVERRIDES" \
-  --field "torch_version=$TORCH_VERSION" \
-  --field "cuda_arch=12.0")"
-export SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR="$NIXL_STORAGE"
-echo "NIXL FILE namespace: $NIXL_STORAGE"
+if [[ "$NIXL" != on ]]; then
+  echo "NIXL disk tier: off; GPU radix cache and host-RAM HiCache only"
+  HICACHE_STORAGE_ARGS=()
+else
+  echo "Deriving NIXL namespace; checkpoint identity hashing may take time..."
+  NIXL_STORAGE="$("$NAMESPACE_HELPER" \
+      --base-root "$NIXL_STORAGE_BASE" \
+      --slug "qwen3_8_flash_next_frspec_524k_nextn_${SGLANG_REV}" \
+      --git-repo "$REPO_ROOT" \
+      --model "target=$TARGET_MODEL" \
+      --field "chat_template_sha256=$CHAT_TEMPLATE_SHA" \
+      --field "image_processor_backend=$IMAGE_PROCESSOR_BACKEND" \
+      --field "mm_preprocess_device=$SGLANG_MM_PREPROCESS_DEVICE" \
+      --field "draft_token_map_sha256=$TOKEN_MAP_SHA" \
+      --field "online_mxfp8=$ONLINE_FP8_PRECISION" \
+      --field "context_length=$CONTEXT_LENGTH" \
+      --field "tp_size=$TP_SIZE" \
+      --field "page_size=$PAGE_SIZE" \
+      --field "compute_dtype=$COMPUTE_DTYPE" \
+      --field "target_kv_dtype=$KV_DTYPE" \
+      --field "speculative_algorithm=NEXTN" \
+      --field "speculative_num_steps=3" \
+      --field "speculative_eagle_topk=1" \
+      --field "speculative_num_draft_tokens=4" \
+      --field "speculative_draft_quantization=unquant" \
+      --field "gdn_mtp_cache_mode=none" \
+      --field "gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA" \
+      --field "hicache_io_backend=kernel" \
+      --field "hicache_mem_layout=page_first" \
+      --field "mamba_ssm_dtype=$MAMBA_SSM_DTYPE" \
+      --field "mamba_conv_dtype=$MAMBA_CONV_DTYPE" \
+      --field "max_mamba_cache_size=$MAX_MAMBA_CACHE_SIZE" \
+      --field "max_running_requests=$MAX_RUNNING_REQUESTS" \
+      --field "mamba_radix_cache_strategy=extra_buffer" \
+      --field "mamba_track_interval=$MAMBA_TRACK_INTERVAL" \
+      --field "linear_attn_decode_backend=flashinfer" \
+      --field "linear_attn_prefill_backend=flashinfer" \
+      --field "ple_offload_embedding=$PLE_OFFLOAD_EMBEDDING" \
+      "${PLE_NAMESPACE_ARGS[@]}" \
+      --field "qsa_compressed_hicache=true" \
+      --field "chunked_prefill_size=$PREFILL_CHUNK_SIZE" \
+      --field "target_model_overrides=$TARGET_OVERRIDES" \
+      --field "torch_version=$TORCH_VERSION" \
+      --field "cuda_arch=12.0")"
+    export SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR="$NIXL_STORAGE"
+    echo "NIXL FILE namespace: $NIXL_STORAGE"
+
+  # With the disk tier off only these three storage-backend arguments
+  # disappear; the GPU radix cache and the host-RAM tier above them stay.
+  HICACHE_STORAGE_ARGS=(--hicache-storage-backend nixl \
+    --hicache-storage-prefetch-policy timeout \
+    --hicache-storage-backend-extra-config "@$NIXL_CONFIG")
+fi
 
 launch_args=(serve \
   --model-path "$TARGET_MODEL" \
@@ -154,16 +239,14 @@ launch_args=(serve \
   --max-mamba-cache-size "$MAX_MAMBA_CACHE_SIZE" --gdn-mtp-cache-mode none \
   --linear-attn-decode-backend flashinfer --linear-attn-prefill-backend flashinfer \
   --mamba-track-interval "$MAMBA_TRACK_INTERVAL" \
-  --enable-hierarchical-cache --hicache-size 32 --hicache-host-memory-mode cache \
+  --enable-hierarchical-cache --hicache-size "$HICACHE_SIZE_GB" --hicache-host-memory-mode cache \
   --hicache-write-policy write_through --hicache-io-backend kernel \
-  --hicache-mem-layout page_first --hicache-storage-backend nixl \
-  --hicache-storage-prefetch-policy timeout \
-  --hicache-storage-backend-extra-config "@$NIXL_CONFIG" \
+  --hicache-mem-layout page_first "${HICACHE_STORAGE_ARGS[@]}" \
   "${PLE_ARGS[@]}" --trust-remote-code \
   --chat-template "$CHAT_TEMPLATE" --image-processor-backend "$IMAGE_PROCESSOR_BACKEND" \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics \
-  --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' \
+  --default-chat-template-kwargs "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
   --speculative-algorithm NEXTN --speculative-num-steps 3 \
   --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 \
   --speculative-draft-model-quantization unquant \

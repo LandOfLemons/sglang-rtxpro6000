@@ -70,7 +70,13 @@ from sglang.srt.speculative.spec_utils import (
     assign_req_to_token_pool_func,
     build_grammar_vocab_mask,
 )
-from sglang.srt.utils import get_available_gpu_memory, is_cuda, is_hip, is_npu
+from sglang.srt.utils import (
+    get_available_gpu_memory,
+    is_cuda,
+    is_hip,
+    is_npu,
+    is_pin_memory_available,
+)
 
 _is_npu = is_npu()
 
@@ -1694,10 +1700,15 @@ class DFlashWorkerV2(BaseSpecWorker):
             # Materialize prompt tokens into the draft KV cache immediately. This is required
             # for radix cache safety (the scheduler may update radix after prefill returns).
             device = next_token_ids.device
-            ctx_lens = torch.tensor(batch.extend_lens, dtype=torch.int32, device=device)
+            # Pinned host staging + non-blocking H2D so small per-batch length
+            # copies do not block the scheduler thread (upstream sgl-project/sglang#40091).
+            pin_memory = is_pin_memory_available(device)
+            ctx_lens = torch.tensor(
+                batch.extend_lens, dtype=torch.int32, pin_memory=pin_memory
+            ).to(device, non_blocking=True)
             draft_seq_lens = torch.tensor(
-                batch.prefix_lens, dtype=torch.int32, device=device
-            )
+                batch.prefix_lens, dtype=torch.int32, pin_memory=pin_memory
+            ).to(device, non_blocking=True)
 
             if batch.out_cache_loc is None:
                 raise RuntimeError(

@@ -6,17 +6,18 @@
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
 | Public documentation and distribution branch | `pennyroyal-main-sm120-final`; continues above the runtime release tag |
-| Executable source HEAD | `1a8f3e9d1f0b7ac847bfa2701bf0f6b69d54a16e` |
+| Core runtime source | `69583da7c71b87ac36371333a19f2749bab72773` |
+| Complete release source | Exact commit selected by `pennyroyal-v2.5.3`, including release packaging updates |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
-| Latest runtime additions | Host-cache retention, optional checkpoint donation guard, reasoning/tool parsing, QSA chunk-prefix handling and optional C6 launch settings |
-| Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.1 Python/JIT source |
-| Release | v2.5.1 |
-| Release tag | `pennyroyal-v2.5.1` |
+| Latest runtime additions | NEXTN checkpoint selection, BF16 NVMe PLE staging, streaming tools, prompt encoding and cache persistence |
+| Dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.3 Python/JIT source |
+| Release | v2.5.3 |
+| Release tag | `pennyroyal-v2.5.3` |
 | Container build source | Exact commit selected by the release tag; also recorded in the image's OCI revision label |
-| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1`; build digest recorded by the [release workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) |
+| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`; published after a successful build, with its digest recorded by the [release workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml) |
 
 The release includes launch recipes, documentation, and measurement summaries.
-v2.5.1 keeps the v2.5.0 dependency stack, optional Flash-Next online FP8 and
+v2.5.3 keeps the v2.5.0 dependency stack, optional Flash-Next online FP8 and
 NVMe PLE, CPU image preprocessing, RAM PLE default, and pinned
 [Froggeric v22.5 template](configs/pennyroyal/templates/README.md). The earlier
 27B release remains available as `qwen38-dflash2-pro6000-20260824`, with its
@@ -38,6 +39,77 @@ graph-lifetime trial remains in history with its complete revert; it contributes
 no change to the released graph implementation. Dependencies and launch
 settings are unchanged. [CHANGES.md](CHANGES.md) records the focused
 two-profile regression scope; existing performance results are not refreshed.
+
+## FlashInfer SM120 accepted source
+
+Pennyroyal ships two already accepted FlashInfer source changes, plus one
+build-only compatibility guard, packaged into the installed FlashInfer of every
+native environment and into the release image by
+`scripts/pennyroyal/flashinfer/install.py`:
+
+| Item | Value |
+|---|---|
+| Pinned distribution | `flashinfer_python[cu13]==0.7.0.post1`, wheel SHA-256 `c7adf826568d61fc1b7d3aadd4cae387a35a138bfc08e2deca2f34ecfa280716` |
+| JIT-cache family | `flashinfer-jit-cache` and `flashinfer-jit-cache-sm120f` at `0.7.0.post1+cu130`; the image installs both with `--no-deps`, and the packaging step refuses a stale shim from the 0.6.17 line instead of failing inside the compile |
+| FlashInfer preimage | upstream base `946200de1ae94fc93fdd0926f0a13afd1fa7f0f1` |
+| Carried mailboxes | `scripts/pennyroyal/flashinfer/patches/moe-source.patch`, `patches/gdn-source.patch` (git-format-patch, production files only), `patches/asan-include-compat.patch` (build-only, one stock file) |
+| MoE commits | `5e86c489f5759cb4006d3b1b5e7bdd14f7a581df`, `b9fa8893102dc3bbcec92762230e7f1678644a4e`, `2a4d8d3a9501bf3b3fe3b78d7c6bad38bfc76064` — Penny `<Pennyroyal@agentmail.to>`, port of `aiueo52/flash-next-rtxpro6000` at `524af49abcca66fcb4377ba8297022804535fccf` and `e0fa9fa9fc3ccd710a8fb3d2639b85ce62188c23` |
+| GDN commit | `0b0ba4c2b18173303b46dd8ec381735e1615b313` — aa24aa `<2496788660@qq.com>`, cherry picked from `c0771c79b7e2f2bc0edf4fdcb7c43b986a56707a`, upstream FlashInfer #6227 |
+| Compatibility guard | `c84ae2ff261d08bb212f5d72867185876d9d71e7` — Penny `<Pennyroyal@agentmail.to>`, local to this packaging and not an upstream change: `nv_internal/cpp/common/memoryUtils.cu` asked for `<sanitizer/asan_interface.h>` unconditionally, which the image's gcc-15 package does not install, so the include now follows the file's own ASAN condition. Non-ASAN builds need nothing new; ASAN builds still require the header. Drop when the pin ships the guard or the build environment always carries the sanitizer headers |
+| Built module | `flashinfer/data/aot/fused_moe_120/fused_moe_120.so`, compiled with `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
+| Build toolchain | job counts and `CXX` come from the caller; nvcc's host compiler is `CUDAHOSTCXX` when set, mapped onto the `CC` that FlashInfer's `build_cuda_cflags` reads for `-ccbin`, in the build subprocess only |
+| Profile default | the two Next recipes and the two Next startup files export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`; an explicit opt-out is carried by the container settings propagation, the resolved mode is a NIXL namespace field (`gdn_fp16_accum_mma`), and FlashInfer's own default and the 27B profile are unchanged |
+
+`accepted-sources.json` records the SHA-256 of every affected file before and
+after the patch, which is what the step and the image check compare against; it
+is regenerated from a fresh extraction of the pinned wheel with `--record`. No
+kernel source is redesigned here, no stride fusion or active-expert packing is
+added, and no host binary or private overlay is shipped. Compilation, image and
+GPU qualification of the resulting module belong to the release host and are
+recorded with the release that carries them.
+
+## v2.5.3 source provenance
+
+Runtime source `69583da7c71b87ac36371333a19f2749bab72773` extends public source
+`da33534bf3e147725f49ffc07674ba2a7f34c98b` without a rebase or dependency
+refresh. That base already contains the BF16 NVMe PLE staging fix
+`e6319ae461d9e54d7d777878a4bf7fc503a69f0f`; v2.5.3 includes it in the normal
+release rather than requiring a container overlay.
+
+The additions correct the NEXTN checkpoint boundary from
+[issue #17](https://github.com/jpezzulli/sglang-rtxpro6000/issues/17), adapt
+streaming string arguments from [#41313](https://github.com/sgl-project/sglang/pull/41313),
+parallel prompt encoding from [#41259](https://github.com/sgl-project/sglang/pull/41259),
+and DFlash prefill copies from [#40091](https://github.com/sgl-project/sglang/pull/40091).
+Cache persistence combines the fresh-chunk backup and in-flight host-ownership
+corrections. NIXL component counting and opt-in host aliases adapt
+[PR #24](https://github.com/jpezzulli/sglang-rtxpro6000/pull/24).
+[CHANGES.md](CHANGES.md#v253--agentic-correctness-and-cache-maintenance)
+records user-facing behavior and contributor credit.
+
+Both TP1 profiles completed full reasoning and streaming-tool runs, with
+fresh 64K storage restoration and device replay on each. Native CUDA transfer
+and checkpoint tests also passed. Earlier long-context, media and full host-cache
+campaigns retain their original source and dates in RESULTS.md.
+
+Release packaging refreshes the NVMe adapter's exact source hashes and version
+references above the checked runtime core. The automatic container build checks
+installation and source identity. GPU container results are recorded with
+v2.5.0; the v2.5.3 runtime checks used native installation.
+
+## v2.5.2 source provenance
+
+Core runtime commits `5d68689198`, `ac8d02ad2a`, `2a94c3dd34`,
+`5997c2acd7` and `a670ea2bdd` add the PLE, QSA, cache-reclamation and TP2
+changes above the public v2.5.1 branch without a rebase. The release also
+includes the subsequent NIXL byte-budget and configurator/launcher changes.
+[CHANGES.md](CHANGES.md#v252--memory-cache-and-setup-maintenance) links the
+adapted upstream PRs and contributor credit.
+
+Both TP1 model profiles received live regression. TP2 verification is pending
+from [u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).
+The optional setup assistant is beta; configuration and packaging checks are
+separate from model-performance measurements.
 
 ## v2.5.1 source provenance
 

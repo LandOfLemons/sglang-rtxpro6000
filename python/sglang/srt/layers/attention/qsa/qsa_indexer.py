@@ -552,6 +552,7 @@ class QSAIndexer(MultiPlatformOp):
         row_ends: torch.Tensor,
         query_positions: torch.Tensor,
         sequence_lengths_for_rows: torch.Tensor,
+        stall_diagnostics=None,
     ) -> torch.Tensor:
         rows = q.shape[0]
         output = torch.empty(
@@ -577,17 +578,36 @@ class QSAIndexer(MultiPlatformOp):
                 )
                 logits = None
             else:
+                if stall_diagnostics is not None:
+                    stall_diagnostics.set_phase(
+                        self.layer_id, f"scoring_rows[{row_start}:{row_end}]"
+                    )
                 logits = qsa_mqa_prefill(
                     q[chunk_slice],
                     compressed_keys,
                     row_starts[chunk_slice],
                     row_ends[chunk_slice],
                 )
+                if stall_diagnostics is not None:
+                    stall_diagnostics.mark_stage(
+                        self.layer_id, f"scores_ready[{row_start}:{row_end}]"
+                    )
+                    stall_diagnostics.set_phase(
+                        self.layer_id, f"topk_rows[{row_start}:{row_end}]"
+                    )
                 block_indices = qsa_fast_topk(
                     logits,
                     row_starts[chunk_slice],
                     row_ends[chunk_slice],
                     topk=self.block_topk,
+                )
+                if stall_diagnostics is not None:
+                    stall_diagnostics.mark_stage(
+                        self.layer_id, f"topk_ready[{row_start}:{row_end}]"
+                    )
+            if stall_diagnostics is not None:
+                stall_diagnostics.set_phase(
+                    self.layer_id, f"expanding_rows[{row_start}:{row_end}]"
                 )
             selected = expand_qsa_block_indices(
                 block_indices,
@@ -597,6 +617,10 @@ class QSAIndexer(MultiPlatformOp):
                 token_topk=self.token_topk,
             )
             output[chunk_slice].copy_(selected)
+            if stall_diagnostics is not None:
+                stall_diagnostics.mark_stage(
+                    self.layer_id, f"expanded_rows_ready[{row_start}:{row_end}]"
+                )
             del logits, block_indices, selected
         return output
 
@@ -648,10 +672,17 @@ class QSAIndexer(MultiPlatformOp):
         positions: torch.Tensor,
         forward_batch,
         indexer_metadata,
+        stall_diagnostics=None,
     ) -> torch.Tensor:
+        # Only the model's active prefix-bearing diagnostic span supplies this
+        # argument. Never insert event work into paged/graph execution.
+        if getattr(indexer_metadata, "is_cuda_graph", False):
+            stall_diagnostics = None
         forward_mode = forward_batch.forward_mode
         is_target_verify = getattr(forward_mode, "is_target_verify", lambda: False)()
         is_draft_extend = getattr(forward_mode, "is_draft_extend_v2", lambda: False)()
+        if forward_mode.is_decode() or is_target_verify or is_draft_extend:
+            stall_diagnostics = None
         if forward_mode.is_decode() or is_target_verify or is_draft_extend:
             # EAGLE/MTP may advance the model's RoPE coordinate independently
             # from the physical paged-KV position.  Compression and sparse
@@ -709,6 +740,8 @@ class QSAIndexer(MultiPlatformOp):
             indexer_metadata.compress_member_rows is not None
             and getattr(indexer_metadata, "has_cross_prefix_group", False)
         )
+        if stall_diagnostics is not None:
+            stall_diagnostics.set_phase(self.layer_id, "index_qk_projection_and_prep")
         q, token_k, state_stored = self.project_qk(
             hidden_states,
             positions,
@@ -723,6 +756,9 @@ class QSAIndexer(MultiPlatformOp):
                 else None
             ),
         )
+        if stall_diagnostics is not None:
+            stall_diagnostics.mark_stage(self.layer_id, "index_qk_prepared")
+            stall_diagnostics.set_phase(self.layer_id, "key_update_and_compress")
         self.update_key_state_and_compress(
             token_k,
             logical_positions,
@@ -731,6 +767,8 @@ class QSAIndexer(MultiPlatformOp):
             state_slots=state_slots,
             state_stored=state_stored,
         )
+        if stall_diagnostics is not None:
+            stall_diagnostics.mark_stage(self.layer_id, "compressed_keys_updated")
         if forward_mode.is_decode() or is_target_verify or is_draft_extend:
             compressed_cache, page_table, compressed_lengths, max_model_len = (
                 indexer_metadata.get_decode_mqa_inputs(self.layer_id)
@@ -761,6 +799,8 @@ class QSAIndexer(MultiPlatformOp):
                 output,
             )
 
+        if stall_diagnostics is not None:
+            stall_diagnostics.set_phase(self.layer_id, "gathering_prefill_inputs")
         compressed_keys, row_starts, row_ends, sequence_lengths = (
             indexer_metadata.get_prefill_mqa_inputs(self.layer_id, logical_positions)
         )
@@ -768,6 +808,8 @@ class QSAIndexer(MultiPlatformOp):
         row_sequence_lengths = sequence_lengths.index_select(
             0, query_sequence_ids.long()
         )
+        if stall_diagnostics is not None:
+            stall_diagnostics.mark_stage(self.layer_id, "prefill_inputs_ready")
         return self.select_prefill_tokens(
             q,
             compressed_keys,
@@ -775,6 +817,11 @@ class QSAIndexer(MultiPlatformOp):
             row_ends,
             logical_positions,
             row_sequence_lengths,
+            **(
+                {"stall_diagnostics": stall_diagnostics}
+                if stall_diagnostics is not None
+                else {}
+            ),
         )
 
 

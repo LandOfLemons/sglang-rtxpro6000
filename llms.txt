@@ -4,14 +4,25 @@
 
 Canonical repository: https://github.com/jpezzulli/sglang-rtxpro6000
 
+Version 2.5.3 includes the Flash-Next checkpoint correction and BF16 NVMe PLE
+staging hotfix. The separate v2.5.2 PLE patch is not needed on v2.5.3. See
+CHANGES.md for streaming-tool, prompt-encoding and cache improvements.
+
 Both profiles use the same runtime source. The documented recipes use one GPU
 and thinking-enabled agentic inference. Start with the Docker guide for a
 prebuilt image or BUILD.md and RUN.md for native installation. Model weights
 are downloaded separately. Detailed settings and dated measurements live in
 the linked documents; this file is an index, not a second set of instructions.
 
+The optional configurator is beta: `./configure-penny --native` or
+`./configure-penny --container`. Use the saved settings and the generated launch
+command; `--check` validates configuration without loading a model. See RUN.md
+for HiCache RAM sizing and the NIXL soft disk budget. Both cache tiers remain
+enabled. See COMMUNITY-RESULTS.md for other users' setups, including TP2.
+
 ## Start here
 
+- [Beta configurator](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/CONFIGURE.md): Guided native and container setup, saved settings, checks and launching.
 - [README](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/README.md): Model choices, release summary, performance tables and setup links.
 - [Docker and Compose](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/docker/pennyroyal/README.md): Prebuilt image, host mounts, profile selection and startup.
 - [Native build](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BUILD.md): Fresh installation, updates, dependencies and checkpoints.
@@ -34,4 +45,4 @@ the linked documents; this file is an index, not a second set of instructions.
 
 - [Backends](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/BACKENDS.md): Kernel and execution-path details.
 - [Memory and persistence](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/MEMORY-AND-PERSISTENCE.md): Hybrid cache state, namespaces and restoration.
-- [Limitations](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/LIMITATIONS.md): Hardware, representation and measurement boundaries.
+- [Limitations](https://raw.githubusercontent.com/jpezzulli/sglang-rtxpro6000/pennyroyal-main-sm120-final/LIMITATIONS.md): Known issues and hardware considerations.

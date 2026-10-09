@@ -1,16 +1,21 @@
 # Pennyroyal container
 
-This Compose service runs the same Pennyroyal v2.5.1 source and launch recipes
+This Compose service runs the same Pennyroyal v2.5.3 source and launch recipes
 as the native installation. The default is Flash-Next with FR-Spec. Native
 installation remains supported and is documented in [`BUILD.md`](../../BUILD.md)
 and [`RUN.md`](../../RUN.md).
 
-Publishing v2.5.1 builds and uploads
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1` through GitHub Actions. Check the
-[Pennyroyal container workflow](https://github.com/jpezzulli/sglang-rtxpro6000/actions/workflows/pennyroyal-container.yml)
-for availability. Python, the CUDA toolchain, NIXL POSIX, and prebuilt
-FlashInfer kernels are included; the host supplies the NVIDIA driver. Native
-installations remain independent of the container image.
+The image below is named
+`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. An image built from this source
+includes Python, the CUDA toolchain, NIXL POSIX, and the FlashInfer SM120
+fused-MoE kernel that the image build compiles from the accepted source in this
+repository; the tag that first carries it is chosen at publication, so older
+tags still run the stock provider kernel. Nothing has to be compiled, configured
+or overlaid on the host: start the container and the recipe loads the module that
+is already inside the image. The host supplies the NVIDIA driver and model
+files. Follow the setup below; Compose will pull the image when you start it.
+Release images become available after the build and CPU installation checks
+pass.
 
 ## Prerequisites
 
@@ -27,8 +32,8 @@ Container and native profiles use the same host-memory settings:
 
 | Profile | Configured host memory |
 |---|---|
-| Flash-Next | 32 GiB HiCache plus roughly 48 GiB for RAM-backed PLE |
-| 27B/DFlash2 | 96 GiB HiCache plus runtime and draft allocations |
+| Flash-Next | 32 GB HiCache by default, plus roughly 48 GiB for RAM-backed PLE |
+| 27B/DFlash2 | 96 GB HiCache by default, plus runtime and draft allocations |
 
 Leave additional room for loading, the runtime, and the operating system. See
 [host memory and first start](../../RUN.md#host-memory-and-first-start). NVMe
@@ -48,21 +53,61 @@ replace this setting.
 
 ## Get the Compose files
 
-Get the matching launch and Compose files from the release tag:
+Get the launch and Compose files, including the WSL2 setup update:
 
 ```bash
-git clone --depth 1 --branch pennyroyal-v2.5.1 \
+git clone --depth 1 --branch pennyroyal-v2.5.3-setup1 \
   https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
-cd pennyroyal/docker/pennyroyal
-cp .env.example .env
+cd pennyroyal
 ```
 
-This checkout supplies configuration and documentation; Docker pulls the
-prebuilt image; no local SGLang build is involved.
+The `setup1` tag updates configuration and documentation for the same v2.5.3
+image. Docker pulls the prebuilt image; no local SGLang build is involved.
+Already have a v2.5.3 checkout? [Update the setup files](../../CONFIGURE.md#update-the-setup-files).
+
+## Guided setup
+
+The optional setup assistant is **beta**; manual Compose setup is available below.
+[CONFIGURE.md](../../CONFIGURE.md) is the dedicated guide to the configurator —
+it walks through setup, the main choices, and saved settings.
+
+If Python 3 is available on the host, run:
+
+```bash
+./configure-penny --container
+./configure-penny --container --check
+```
+
+Choose Next or 27B, enter your model and cache paths, and review the settings
+before saving. The utility writes `docker/pennyroyal/.env`; it does not install
+or start anything. Model paths inside the container begin with `/models`.
+For example, `/srv/models/MyModel` on the host becomes `/models/MyModel` when
+`HOST_MODELS_ROOT=/srv/models`.
+
+Create the cache directories shown by the check, with the configured UID/GID,
+then run the launch command printed by setup. That command includes the
+selected configuration and can be run from any directory. Rerun setup to
+change settings; stop and recreate the container to apply them.
+
+Next needs one target checkpoint. The 27B profile also needs its DFlash2 draft.
+Choose the HiCache RAM size and optional NIXL disk budget during setup, or set
+`PENNY_HICACHE_SIZE_GB` and `SGLANG_HICACHE_NIXL_MAX_CACHE_GB` in `.env`.
+HiCache accepts whole GB starting at 1; the disk budget uses GiB. A disk budget
+of 0 means unlimited, not disabled. Both cache tiers remain enabled. See
+[RAM sizing](../../RUN.md#choose-hicache-ram-size) and
+[what the disk budget covers](../../RUN.md#limit-nixl-disk-use).
+
+Prefer to edit the configuration yourself? Use the manual path below. No host
+Python is needed for manual Compose setup.
 
 <a id="profiles-and-checks"></a>
 
-## Choose a profile and configure `.env`
+## Manual setup
+
+```bash
+cd docker/pennyroyal
+cp .env.example .env
+```
 
 Set `PENNYROYAL_PROFILE` in `.env` to one of:
 
@@ -110,9 +155,12 @@ sudo install -d -o 1000 -g 1000 \
 
 ## Start and verify
 
-Pull the image and start in the background:
+For manual setup, run these from `docker/pennyroyal`. Normal Compose rules
+apply: exported shell variables take precedence over `.env`; unset conflicting
+exports if you want to use the saved values.
 
 ```bash
+docker compose config --quiet
 docker compose pull
 docker compose up -d
 docker compose logs -f pennyroyal
@@ -124,8 +172,15 @@ start period. Configuration errors stop the container without entering a
 restart loop.
 
 The API is published at `http://localhost:8001/v1` by default. After the log
-reports readiness, use the health and chat requests in
-[`RUN.md`](../../RUN.md#smoke-through-the-normal-api).
+reports readiness, check it with:
+
+```bash
+curl -fsS http://127.0.0.1:8001/health
+```
+
+Use `pennyroyal` as the model name in your client. A
+[sample chat request](../../RUN.md#smoke-through-the-normal-api) is available
+if you want to try the API directly.
 
 Inspect or stop the service with:
 
@@ -138,25 +193,32 @@ docker compose down
 `down` allows up to two minutes for shutdown, then removes the container and
 network. The three bind-mounted host directories remain intact.
 
-## Image checks and command boundary
+<a id="image-checks-and-command-boundary"></a>
+
+## Check the image and run commands
 
 The entrypoint exposes two non-serving checks. The CPU-only import check skips
 device work:
 
 ```bash
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1 --help
-docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1 --check
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --help
+docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3 --check
 ```
 
-Arbitrary commands require the explicit `exec` boundary:
+`--check` also reports the accepted FlashInfer source and the SHA-256 of the
+package-local SM120 module it loads; a stock FlashInfer install, or one where
+the prebuilt provider kernel was simply copied into place, fails it. See
+[FlashInfer SM120 source integration](../../BUILD.md#flashinfer-sm120-source-integration).
+
+To run another command inside the image, use `exec`:
 
 ```bash
 docker compose run --rm pennyroyal exec .venv/bin/python --version
 ```
 
-The v2.5.1 image build runs the automated CPU installation check shown above.
-Both profiles were regression-tested natively on the release source. The fresh
-container GPU qualification remains the v2.5.0 result: both profiles passed API
+Release image builds run the automated CPU installation check shown above.
+Both profiles were regression-tested natively on the release source. In the
+v2.5.0 container tests, both profiles passed API
 schema/tool checks, 64K prefill, 1,024-token C1/C4 decode, JPEG and static-video
 checks, and NIXL reuse after container restart. Each restored 63,872 of 63,906
 prompt tokens from storage and returned exact `READY`. That GPU serving test
@@ -173,14 +235,64 @@ change to a running deployment, update `.env`, then recreate the container:
 docker compose up -d --force-recreate
 ```
 
-Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
-`SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default.
+Online FP8 is selected automatically for eligible Flash-Next launches on
+exact SM120 — no menu and no copied benchmark switch. Read
+[`FP8.md`](../../FP8.md) for the private `SGLANG_SM120_ONLINE_MXFP8=false`
+opt-out. RAM-backed PLE is the default. The
+Next startup files run the patched FlashInfer GDN prefill kernels in
+FP16-accumulate MMA mode; change the exported value to `0` in the startup file,
+or set `FLASHINFER_GDN_FP16_ACCUM_MMA=0` in `.env` (or pass it with `-e`), to
+opt out. The 27b profile uses Triton GDN and ignores the setting.
+
+### WSL2
+
+Enable the HiCache host-memory workaround by adding this to `.env`:
+
+```dotenv
+SGLANG_HICACHE_TORCH_PINNED_ALLOC=true
+```
+
+The beta configurator also offers **WSL2 host-memory workaround** under
+**Advanced**. It is off by default; leave it off on native Linux. Recreate an
+existing container after changing the setting, using the command above.
+
+### Other settings
+
+`PENNY_REASONING_EFFORT` is a launcher-level convenience (PR#18): unset
+(default) keeps the recipes' `medium` default chat-template
+kwargs, and `none|minimal|low|medium|high|xhigh|max` rewrites just that
+key before launch. It is launcher-only -- the server does not read it --
+and an explicit per-request `reasoning_effort` always wins over the
+default. An invalid value stops the container at launch.
+
+`TP_SIZE=2` asks the Next recipes for two tensor-parallel ranks (the
+default is `TP_SIZE=1`), but `TP_SIZE` does not grant GPU access:
+this compose.yaml reserves exactly one GPU under
+`deploy.resources.reservations.devices`, and Compose users who want TP2 must
+also edit that existing reservation to name two explicit ids — the complete
+item is:
+
+```yaml
+            - driver: nvidia
+              device_ids: ["0", "1"]
+              capabilities: [gpu]
+```
+
+Otherwise the recipe fails at launch with the visible-device count it found
+and this fragment, rather than hanging in NCCL or silently running TP1
+(`SGLANG_MM_PREPROCESS_DEVICE=cuda:N` outside the model range counts as an
+extra needed device). TP2 verification is pending from
+[u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).
+Each TP size uses a separate NIXL namespace, a replicated
+FR-Spec draft head, and one scheduler per GPU. Peer access is not verified
+at startup; if NCCL hangs during transport init on a consumer-PCIe host,
+`NCCL_P2P_DISABLE=1` can help isolate a P2P/ACS/IOMMU problem at a possible
+throughput cost the startup log repeats; the image never sets it for you.
 
 For the optional six-request Flash-Next profile, keep preprocessing on the CPU
 and set these values in `.env`:
 
 ```dotenv
-SGLANG_SM120_ONLINE_MXFP8=true
 SGLANG_MM_PREPROCESS_DEVICE=cpu
 MAX_RUNNING_REQUESTS=6
 MAX_MAMBA_CACHE_SIZE=36
@@ -243,34 +355,6 @@ newer and replaces the default device reservation. The model stays on
 `cuda:0`; only preprocessing uses `cuda:1`. Use GPU UUIDs in `device_ids` when
 stable device selection matters.
 
-### WSL2
-
-WSL2 does not give `cudaHostRegister`'d mmap memory the same device pointer as
-`Tensor.data_ptr()`. Mamba host backup uses that pointer. Set this before
-starting the container so HiCache host pools use Torch's pinned allocator:
-
-```dotenv
-SGLANG_HICACHE_TORCH_PINNED_ALLOC=1
-```
-
-Leave it unset on native Linux. The qualified scripts keep their defaults.
-
-Docker Desktop on WSL2 still shows every GPU inside the container when
-`NVIDIA_VISIBLE_DEVICES` is set. Hide the extra GPU with
-`CUDA_VISIBLE_DEVICES` so SGLang sees only the PRO 6000.
-
-The hybrid Mamba pool is not 4K-aligned, so NIXL `use_direct_io=true` falls
-back to bounce buffers on WSL2. Point `NIXL_CONFIG` at a copy of the bundled
-toml with `use_direct_io=false` and `use_uring=true`.
-
-The qualified scripts use HiCache `write_through` and NIXL prefetch `timeout`.
-A WSL2 agent host that already measured an earlier release with `write_back`
-and `wait_complete` can keep that pair: lazy host writes, and prefetch that
-finishes before the request runs. `wait_complete` avoids treating a late
-prefetch as a miss. These are overrides of the qualified recipe, not a new
-default. The published launch scripts still hardcode `write_through` and
-`timeout`.
-
 ### SELinux hosts
 
 If your container engine enables SELinux confinement, UID/GID ownership alone
@@ -292,16 +376,14 @@ read-only. Omit the override when the engine does not enforce SELinux labels.
 ## Release builds
 
 Publishing a GitHub release builds its exact tagged source and uploads the
-matching versioned image automatically. For example, `pennyroyal-v2.5.1`
-produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.1`. Draft releases and ordinary
+matching versioned image automatically. For example, `pennyroyal-v2.5.3`
+produces `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.3`. Draft releases and ordinary
 branch pushes do not publish a release image. No moving `latest` tag is used.
 
 The build checks package versions, the source revision and import location,
-launcher syntax, the entrypoint and the NIXL POSIX plugin without a GPU. A
-failed check fails the workflow and leaves the version tag unchanged. GPU
-regression remains separate: routine source-only maintenance uses the tested
-native runtime evidence, while changes to the container's dependency stack or
-device handling warrant another GPU container check.
+launcher syntax, the entrypoint, the accepted FlashInfer SM120 source and
+installed module, and the NIXL POSIX plugin without a GPU. A failed check fails
+the workflow and leaves the version tag unchanged.
 
 For a failed build, rerun the **Pennyroyal container** workflow in Actions.
 Alternatively, run it manually against the release's Git tag with both inputs

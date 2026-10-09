@@ -46,6 +46,9 @@ def required_cutoff(current):
     return cutoff if current >= cutoff else cutoff - dt.timedelta(days=1)
 
 
+_EPOCH = '1970-01-01T00:00:00+00:00'
+
+
 class MissingRunResource(RuntimeError):
     pass
 
@@ -85,6 +88,7 @@ class GitHub:
         tree = self.api('git/trees/' + head)
         if tree.get('truncated'):
             raise RuntimeError('Truncated history tree')
+        all_entries = {x['path'] for x in tree['tree']}
         entries = {x['path']: x for x in tree['tree'] if x['type'] == 'blob'}
         required = ('daily.json', 'package-downloads.json')
         if any(path not in entries for path in required):
@@ -105,10 +109,53 @@ class GitHub:
             raise RuntimeError('Canonical package archive identity/schema/days invalid')
         traffic_collected = timestamp(traffic['collected_at'])
         package_collected = timestamp(package['collected_at'])
-        if max(traffic_collected, package_collected) > now() + dt.timedelta(minutes=5):
+        # HF archive may be genuinely uninitialized (no artifacts at all) during
+        # initial rollout; represent that as an old timestamp so the collector
+        # dispatches. Established-but-lost HF history fails loudly.
+        hf_collected = None
+        if 'huggingface-downloads.json' in entries:
+            response = self.api('git/blobs/' + entries['huggingface-downloads.json']['sha'])
+            if response.get('encoding') != 'base64' or not response.get('content'):
+                raise RuntimeError('Missing or malformed canonical archive: huggingface-downloads.json')
+            hf = json.loads(base64.b64decode(response['content']))
+            if (hf.get('repository') != self.repository or hf.get('schema_version') != 1
+                    or not isinstance(hf.get('days'), dict) or not hf['days']):
+                raise RuntimeError('Canonical Hugging Face archive identity/schema/days invalid')
+            # A corrupt/timestamp-inconsistent HF document must not be marked
+            # current (which would skip recovery): validate ordering and dates.
+            try:
+                hf_first = timestamp(hf['first_collected_at'])
+                hf_collected = timestamp(hf['collected_at'])
+                if hf_first > hf_collected:
+                    raise RuntimeError('Canonical Hugging Face archive timestamps out of order')
+                for day, observation in hf['days'].items():
+                    if dt.date.fromisoformat(day).isoformat() != day:
+                        raise RuntimeError('Invalid Hugging Face archive date')
+                    observed_at = timestamp(observation['collected_at'])
+                    if observed_at.date() != dt.date.fromisoformat(day) or \
+                            not hf_first <= observed_at <= hf_collected:
+                        raise RuntimeError(
+                            'Hugging Face observation timestamp is inconsistent with its canonical day')
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(f'Canonical Hugging Face archive timestamps invalid: {exc}') from None
+        else:
+            has_hf_artifacts = ('HUGGINGFACE-DOWNLOADS.md' in all_entries
+                                or 'huggingface-snapshots' in all_entries)
+            if not has_hf_artifacts and 'raw' in all_entries:
+                # Check raw subtree for huggingface/ marker
+                raw_entries = self.api('git/trees/' + next(
+                    x['sha'] for x in tree['tree'] if x['path'] == 'raw'))
+                has_hf_artifacts = any(e['path'] == 'huggingface'
+                                       for e in raw_entries.get('tree', []))
+            if has_hf_artifacts:
+                raise RuntimeError(
+                    'Established Hugging Face archive missing (canonical JSON lost)')
+            hf_collected = dt.datetime.fromisoformat(_EPOCH)
+        if max(traffic_collected, package_collected, hf_collected) > now() + dt.timedelta(minutes=5):
             raise RuntimeError('Archive collection timestamp is in the future')
         return {'head': head, 'collected_at': traffic_collected.isoformat(),
                 'package_collected_at': package_collected.isoformat(),
+                'hf_collected_at': hf_collected.isoformat(),
                 'through_date': traffic['coverage']['through_date']}
 
     def runs(self):
@@ -136,7 +183,8 @@ def reconcile(github, state_dir, branch, wait_seconds=480, poll_seconds=15,
     verified = load_json(verified_path)
     cutoff = required_cutoff(now())
     both_current = (timestamp(archive['collected_at']) >= cutoff and
-                    timestamp(archive['package_collected_at']) >= cutoff)
+                    timestamp(archive['package_collected_at']) >= cutoff and
+                    timestamp(archive['hf_collected_at']) >= cutoff)
     if pending is None and verified is not None and both_current:
         print(f'Current: traffic collected {archive["collected_at"]}; package collected '
               f'{archive["package_collected_at"]}; through {archive["through_date"]}', flush=True)
@@ -198,16 +246,18 @@ def reconcile(github, state_dir, branch, wait_seconds=480, poll_seconds=15,
             archive = github.archive(branch)
             required = max(timestamp(pending['requested_at']), required_cutoff(now()))
             if (timestamp(archive['collected_at']) < required or
-                    timestamp(archive['package_collected_at']) < required):
+                    timestamp(archive['package_collected_at']) < required or
+                    timestamp(archive['hf_collected_at']) < required):
                 pending_path.unlink()
                 return retry_or_fail(
-                    f'Traffic run {run["id"]} succeeded without fresh traffic and package archives; retrying collection')
+                    f'Traffic run {run["id"]} succeeded without fresh traffic, package, and Hugging Face archives; retrying collection')
             write_json(verified_path, {'verified_at': now().isoformat(), 'run_id': run['id'],
                                       'run_url': run['html_url'], 'archive': archive})
             pending_path.unlink()
             print(f'Verified automatic collection: {run["html_url"]}; '
                   f'history {archive["head"]}; traffic {archive["collected_at"]}; '
                   f'package {archive["package_collected_at"]}; '
+                  f'hf {archive["hf_collected_at"]}; '
                   f'through {archive["through_date"]}', flush=True)
             return
         if time.monotonic() >= deadline:

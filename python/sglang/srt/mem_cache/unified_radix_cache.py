@@ -1199,7 +1199,9 @@ class UnifiedRadixCache(BasePrefixCache):
         device_indices, extra_transfers = self._retraction_device_transfers(req)
         host_indices = self.host_pool_group.alloc(len(device_indices))
         if host_indices is None:
-            self._reclaim_retraction_host(len(device_indices))
+            shortfall = len(device_indices) - self.host_pool_group.available_size()
+            if shortfall > 0:
+                self._reclaim_retraction_host(shortfall)
             host_indices = self.host_pool_group.alloc(len(device_indices))
         if host_indices is None:
             return None
@@ -1308,6 +1310,14 @@ class UnifiedRadixCache(BasePrefixCache):
             return 0
         written = 0
         for node_id in action.node_ids:
+            if not write_back and (
+                self.tree_core.node_by_id(node_id).write_through_pending_id
+                is not None
+            ):
+                # A backup for this node is already in flight (overlapping
+                # chain actions reach it again); its ack publishes the host
+                # copy. A second one would allocate orphaned host slots.
+                continue
             device_value, comp_xfers = self.tree_core.build_backup_spec(node_id)
             # Overlapping chain actions may revisit nodes with Full KV already
             # backed up. Skip only when no transfer remains.
@@ -2181,7 +2191,9 @@ class UnifiedRadixCache(BasePrefixCache):
             alloc_len = operation.storage_hit_count
             host_indices = cc.mem_pool_host.alloc(alloc_len)
             if host_indices is None:
-                self.evict_host(alloc_len)
+                shortfall = alloc_len - cc.mem_pool_host.available_size()
+                if shortfall > 0:
+                    self.evict_host(shortfall)
                 host_indices = cc.mem_pool_host.alloc(alloc_len)
             if host_indices is None and not buffer_mode:
                 # Memory-pressure fallback: a shorter page-aligned prefix.

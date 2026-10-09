@@ -145,6 +145,26 @@ class EnvBool(EnvField):
         raise ValueError(f'"{value}" is not a valid boolean value')
 
 
+class EnvOptionalBool(EnvBool):
+    """Tri-state boolean: unset or blank reads as None (automatic).
+
+    For kernel-path switches where absence is a real decision -- the runtime
+    applies the accepted default selection -- while an explicit true/false is
+    honored verbatim as a private compatibility/debug escape hatch. A
+    non-blank value that is not boolean fails loudly.
+    """
+
+    def __init__(self, default: Any = None, secret: bool = False):
+        assert default is None, "EnvOptionalBool only defaults to automatic (None)"
+        super().__init__(None, secret=secret)
+
+    def get(self) -> Any:
+        value = os.getenv(self.name)
+        if value is None or not value.strip():
+            return None
+        return self.parse(value)
+
+
 class EnvInt(EnvField):
     def parse(self, value: str) -> int:
         try:
@@ -345,6 +365,8 @@ class Envs:
     SGLANG_LOG_SCHEDULER_STATUS_TARGET = EnvStr("")
     SGLANG_LOG_SCHEDULER_STATUS_INTERVAL = EnvFloat(60.0)
     SGLANG_ENABLE_RANK_CONSENSUS_CHECKER = EnvBool(False)
+    # Stall-only QSA chunk-prefill phase and CUDA-event diagnostics.
+    SGLANG_QSA_STALL_DIAGNOSTICS = EnvBool(False)
 
     # ===================================================================
     # IPC, broadcasters, and ports
@@ -710,10 +732,20 @@ class Envs:
     SGLANG_ENABLE_HICACHE_BUFFER_ANCHOR_LOCK = EnvBool(False)
     SGLANG_HICACHE_BUFFER_ANCHOR_LOCK_CAP = EnvFloat(0.5)
     SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR = EnvStr(None)
+    # Opt-in (WSL2): allocate HiCache host pool buffers via torch's
+    # cudaHostAlloc-backed pinned memory instead of cudaHostRegister'd mmap,
+    # whose CUDA device alias differs from Tensor.data_ptr() under WSL2.
+    # Unset/0 preserves the native-Linux host-register allocator defaults.
+    SGLANG_HICACHE_TORCH_PINNED_ALLOC = EnvBool(False)
     # Enable O_DIRECT when opening NIXL POSIX backend files (bypasses OS page cache).
     # Disable with SGLANG_HICACHE_NIXL_USE_DIRECT_IO=0 or via the
     # "use_direct_io": false key in --hicache-storage-backend-extra-config.
     SGLANG_HICACHE_NIXL_USE_DIRECT_IO = EnvBool(True)
+    # Optional soft byte budget (GiB) for the NIXL FILE cache's configured
+    # storage dirs, enforced by the L3 cleaner alongside disk watermarks.
+    # 0/unset disables the quota; the top-level "l3_cleaner_max_cache_gb" key in
+    # --hicache-storage-backend-extra-config overrides this.
+    SGLANG_HICACHE_NIXL_MAX_CACHE_GB = EnvStr(None)
     SGLANG_HUGEPAGE_SIZE = EnvStr("")
 
     # ===================================================================
@@ -1007,10 +1039,32 @@ class Envs:
     # Enable the allowlisted low-M BF16 Split-K GEMM path on Blackwell. Shapes
     # outside the measured allowlist continue to use CuTe DSL/cuBLAS.
     SGLANG_ENABLE_BF16_SPLITK_GEMM = EnvBool(True)
-    # Opt-in Flash-Next-only conversion of eligible BF16 projections on exact
-    # SM120. Large linears use MXFP8; lm_head and HyperConnection mix weights
-    # use rowwise weight-only FP8. An explicit unsupported request fails boot.
-    SGLANG_SM120_ONLINE_MXFP8 = EnvBool(False)
+    # Flash-Next-only conversion of eligible BF16 projections on exact SM120.
+    # Large linears use rowwise (per-output-channel) FP8; lm_head and
+    # HyperConnection mix weights carry one FP32 scale per output row. Unset
+    # or blank means automatic: eligible Flash-Next checkpoints on exact SM120
+    # select the accepted rowwise-FP8 paths without any launch flag; a saved
+    # explicit false/true is the private compatibility escape hatch, and an
+    # explicit unsupported request still fails boot.
+    SGLANG_SM120_ONLINE_MXFP8 = EnvOptionalBool()
+    # Route the resident rowwise-FP8 target/draft output heads through the
+    # donor's low-row W8A16 Triton GEMV. Automatic (eligible default
+    # selection); larger batches and unsupported layouts keep the existing
+    # rowwise kernel; MAX_M can only shrink the row budget, never exceed the
+    # kernel's own 16-row limit.
+    SGLANG_FP8_W8A16_GEMV = EnvOptionalBool()
+    SGLANG_FP8_W8A16_GEMV_MAX_M = EnvInt(16)
+    # Fused gated-RMSNorm prologue for the Flash-Next GDN out_proj GEMV
+    # (layers/quantization/w8a16_gemv.py, models/qwen3_5.py). Automatic under
+    # the same eligibility; each call re-resolves, so import order never
+    # pins the choice. Exact-SM120 shapes keep the TP2/unfused fallback.
+    SGLANG_NORM_INTO_GEMV = EnvOptionalBool()
+    # Donor SGLANG_MTP_FC_GEMV (aiueo52/sglang-rtxpro6000 @5105985
+    # qwen4_exp_mtp.py:32): route the draft MTP entry fusion's BF16
+    # fc_embedding/fc_hidden GEMMs through the resident donor dense GEMV at
+    # decode widths (rows <= 16); everything else keeps the cuBLAS fallback.
+    # Automatic under the same eligible default selection.
+    SGLANG_MTP_FC_GEMV = EnvOptionalBool()
     # Route decode-size HC mix through the fused CuTe split-K GEMM pair
     # instead of the persistent Triton mix.
     SGLANG_HC_MIX_CUDA = EnvBool(True)
@@ -1083,6 +1137,12 @@ class Envs:
     # standard dispatcher, and the triton MoE runner; falls back silently
     # otherwise.
     SGLANG_OPT_MOE_QUANT_ONCE = EnvBool(False)
+    # Draft (MTP/NEXTN) MoE layers on the FlashInfer CUTLASS NVFP4 runner: run
+    # one-token calls as a W4A16 Triton GEMV (layers/moe/draft_moe_gemv.py).
+    # Changes draft numerics only (bf16 activations instead of FP4).
+    # Automatic for eligible Flash-Next default selections; explicit false
+    # keeps the original runner path everywhere else.
+    SGLANG_OPT_DRAFT_MOE_GEMV = EnvOptionalBool()
 
     # ===================================================================
     # DeepGEMM Mega MoE
@@ -1093,6 +1153,11 @@ class Envs:
     # Top-k kernels
     # ===================================================================
     SGLANG_OPT_USE_FUSED_HASH_TOPK = EnvBool(True)
+    # Packed-key softmax router for bf16 logits (kernels/ops/moe/
+    # moe_router_softmax_fast.py). Automatic for eligible Flash-Next SM120
+    # default selections only; unset elsewhere keeps the flashinfer/AOT
+    # routers, and a saved explicit true/false remains the private hatch.
+    SGLANG_ROUTER_FAST_TOPK = EnvOptionalBool()
     # Opt-in: route DeepSeek-V3 grouped topk through the unified Triton router
     # instead of the flashinfer/AOT grouped kernels. Off by default (flashinfer is
     # the tuned production path); the Triton path is bit-exact on DeepSeek-V3.2 e2e
@@ -1252,6 +1317,11 @@ class Envs:
     # Think tokens budget: negative means unlimited, >= 0 caps thinking tokens
     SGLANG_MAX_THINK_TOKENS = EnvInt(-1)
     SGLANG_PATCH_TOKENIZER = EnvBool(True)
+    # Encode long rendered chat prompts as chunks on the tokenizers thread pool.
+    SGLANG_PARALLEL_PROMPT_ENCODE = EnvBool(True)
+    # Shorter prompts use the single-call encode; below this the gain is eaten
+    # by rayon dispatch and the id merge.
+    SGLANG_PARALLEL_PROMPT_ENCODE_MIN_CHARS = EnvInt(32768)
     SGLANG_REQUEST_STATE_WAIT_TIMEOUT = EnvInt(4)
     SGLANG_DEFAULT_THINKING = EnvBool(False)
 

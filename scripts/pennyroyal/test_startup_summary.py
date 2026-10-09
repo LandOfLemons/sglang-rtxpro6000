@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SUMMARY = ROOT / "configs" / "pennyroyal" / "startup-summary.sh"
 BASE = "5d1a31074028a16f3fba468ed144125cc1222e18"
@@ -68,11 +67,16 @@ class StartupSummaryTest(unittest.TestCase):
 
         self.assertIn("Profile: Qwen3.8 Flash-Next / native NEXTN MTP | TP: 2", output)
         self.assertIn("Model: /models/Flash Next [qualified]", output)
-        self.assertIn("FR-Spec: on | Online FP8: true | KV dtype: fp8_e4m3", output)
+        self.assertIn(
+            "FR-Spec: on | Online FP8: rowwise FP8 (explicit) | KV dtype: fp8_e4m3",
+            output,
+        )
         self.assertIn("Context: 524288 tokens | KV cap: 824384", output)
         self.assertIn("Max running requests: 4 | Mamba slots: 24", output)
-        self.assertIn("PLE: host RAM | HiCache: true | Host tier: 32 GiB", output)
-        self.assertIn("Storage backend: nixl | NIXL location: /cache/NIXL pool [one]", output)
+        self.assertIn("PLE: host RAM | HiCache: true | Host tier: 32 GB", output)
+        self.assertIn(
+            "Storage backend: nixl | NIXL location: /cache/NIXL pool [one]", output
+        )
         self.assertIn("Media preprocessing: CPU (sglang)", output)
 
     def test_nextn_without_frspec_reports_automatic_cap_and_secondary_gpu(self):
@@ -88,7 +92,30 @@ class StartupSummaryTest(unittest.TestCase):
         self.assertIn("FR-Spec: off", output)
         self.assertIn("Context: automatic tokens | KV cap: automatic", output)
         self.assertIn("PLE: no host offload requested", output)
-        self.assertIn("Media preprocessing: secondary GPU (cuda:2) (transformers)", output)
+        self.assertIn(
+            "Media preprocessing: secondary GPU (cuda:2) (transformers)", output
+        )
+
+    def test_nextn_reports_the_automatic_rowwise_selection(self):
+        # No saved choice: the summary reports the effective behavior the
+        # recipes resolved before launching, not a manufactured opt-out.
+        output = self.summary(
+            "serve",
+            "--model-path=/models/next",
+            "--speculative-algorithm=NEXTN",
+            env={
+                "ONLINE_FP8_PRECISION": "rowwise_fp8",
+                "SGLANG_MM_PREPROCESS_DEVICE": "cpu",
+            },
+        )
+        self.assertIn("Online FP8: rowwise FP8 (automatic)", output)
+        output = self.summary(
+            "serve",
+            "--model-path=/models/next",
+            "--speculative-algorithm=NEXTN",
+            env={"SGLANG_MM_PREPROCESS_DEVICE": "cpu"},
+        )
+        self.assertIn("Online FP8: off (automatic: eligibility not met)", output)
 
     def test_nextn_nvme_ple_and_main_gpu(self):
         output = self.summary(
@@ -125,11 +152,21 @@ class StartupSummaryTest(unittest.TestCase):
         self.assertIn("Profile: Qwen3.8-27B / DFlash2", output)
         self.assertIn("Model: /models/target model", output)
         self.assertIn("Draft model: /models/draft model", output)
-        self.assertIn("FR-Spec: off | Online FP8: not applicable | KV dtype: fp8_e4m3", output)
+        self.assertIn(
+            "FR-Spec: off | Online FP8: not applicable | KV dtype: fp8_e4m3", output
+        )
         self.assertIn("Draft KV dtype: fp8_e5m2", output)
         self.assertIn("PLE: not applicable", output)
 
     def test_all_launcher_argv_match_the_base_exec_blocks(self):
+        # The comparison needs the base commit's blobs. A shallow or partial
+        # clone may not carry that object at all; say so instead of reporting
+        # a recipe regression that never happened.
+        probe = subprocess.run(
+            ["git", "cat-file", "-t", BASE], cwd=ROOT, capture_output=True, text=True
+        )
+        if probe.returncode != 0:
+            self.skipTest(f"base commit {BASE[:10]} is not available here")
         for launcher in LAUNCHERS:
             with self.subTest(launcher=launcher), tempfile.TemporaryDirectory() as temp:
                 temp_root = Path(temp)
@@ -148,18 +185,42 @@ class StartupSummaryTest(unittest.TestCase):
                     ["git", "show", f"{BASE}:{relative}"], cwd=ROOT, text=True
                 )
                 current_source = (ROOT / relative).read_text()
-                base_block = self._from_last_line(base_source, 'exec "$SGLANG_EXE" serve')
-                current_block = self._from_last_line(current_source, "launch_args=(serve")
+                base_block = self._from_last_line(
+                    base_source, 'exec "$SGLANG_EXE" serve'
+                )
+                current_block = self._from_last_line(
+                    current_source, "launch_args=(serve"
+                )
 
                 base_argv, base_output = self._run_launch_block(
                     base_block, executable, base_capture
                 )
                 current_argv, current_output = self._run_launch_block(
-                    current_block, executable, current_capture
+                    current_block,
+                    executable,
+                    current_capture,
+                    # The chosen RAM cache size is now a variable the recipe
+                    # guards; with no choice made it must expand to the same
+                    # qualified literal the base block still hardcodes, so the
+                    # two argvs stay byte-identical.
+                    hicache_size=self._qualified_hicache_size(current_source),
                 )
                 self.assertNotIn("Pennyroyal startup — requested settings", base_output)
                 self.assertIn("Pennyroyal startup — requested settings", current_output)
                 self.assertEqual(base_argv, current_argv)
+
+    @staticmethod
+    def _qualified_hicache_size(current_source: str) -> str:
+        import re
+
+        match = re.search(
+            r'^HICACHE_SIZE_GB="\$\{PENNY_HICACHE_SIZE_GB:-([0-9]+)\}"$',
+            current_source,
+            re.MULTILINE,
+        )
+        if not match:
+            raise AssertionError("the recipe lost its qualified HiCache default")
+        return match.group(1)
 
     @staticmethod
     def _from_last_line(source: str, prefix: str) -> str:
@@ -170,7 +231,11 @@ class StartupSummaryTest(unittest.TestCase):
         return "\n".join(lines[matches[-1] :]) + "\n"
 
     def _run_launch_block(
-        self, block: str, executable: Path, capture: Path
+        self,
+        block: str,
+        executable: Path,
+        capture: Path,
+        hicache_size: str = "",
     ) -> tuple[list[str], str]:
         scalar_values = {
             "SGLANG_EXE": str(executable),
@@ -189,6 +254,13 @@ class StartupSummaryTest(unittest.TestCase):
             "PREFILL_CHUNK_SIZE": "4096",
             "MAMBA_SSM_DTYPE": "bfloat16",
             "MAMBA_TRACK_INTERVAL": "256",
+            # The Next recipes read these from request-capacity.sh, whose
+            # defaults are the literals the older block still hardcodes, so
+            # giving the fixture the same values compares identical argv.
+            "MAX_RUNNING_REQUESTS": "4",
+            "MAX_MAMBA_CACHE_SIZE": "24",
+            # The integrated release sources this unchanged default separately.
+            "DEFAULT_CHAT_TEMPLATE_KWARGS": '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}',
             "NIXL_CONFIG": "/configs/NIXL config [qualified].json",
             "CHAT_TEMPLATE": "/templates/chat template (tools).jinja",
             "IMAGE_PROCESSOR_BACKEND": "sglang",
@@ -196,6 +268,8 @@ class StartupSummaryTest(unittest.TestCase):
             "DRAFT_TOKENS": "8",
             "DRAFT_WINDOW_SIZE": "32",
         }
+        if hicache_size:
+            scalar_values["HICACHE_SIZE_GB"] = hicache_size
         lines = ["set -euo pipefail"]
         lines.extend(
             f"{name}={shlex.quote(value)}" for name, value in scalar_values.items()
@@ -204,6 +278,15 @@ class StartupSummaryTest(unittest.TestCase):
             (
                 "TOKEN_CAP_ARGS=(--max-total-tokens 824384)",
                 "PLE_ARGS=(--ple-offload-embedding)",
+                # The disk tier is on by default, and the recipe now keeps the
+                # three NIXL FILE storage-backend arguments in one guarded array
+                # (see the NIXL=on/off switch). Stating them here the way the
+                # recipe does keeps the comparison against the base block honest:
+                # an empty array would silently drop the disk tier from the
+                # current argv and the two lists could never match.
+                "HICACHE_STORAGE_ARGS=(--hicache-storage-backend nixl "
+                "--hicache-storage-prefetch-policy timeout "
+                '--hicache-storage-backend-extra-config "@$NIXL_CONFIG")',
                 f"export CAPTURE_PATH={shlex.quote(str(capture))}",
                 block,
             )

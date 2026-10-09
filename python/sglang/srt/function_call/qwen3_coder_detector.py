@@ -12,7 +12,13 @@ from sglang.srt.function_call.core_types import (
     _GetInfoFunc,
 )
 from sglang.srt.function_call.utils import (
+    TOOL_PARSER_ACCEPTED,
+    TOOL_PARSER_ARGUMENT_CONVERSION_FAILED,
+    TOOL_PARSER_INCOMPLETE,
+    TOOL_PARSER_PARSE_ERROR,
+    TOOL_PARSER_UNKNOWN_TOOL,
     infer_type_from_json_schema,
+    record_tool_parser_event,
     safe_literal_eval,
 )
 
@@ -58,6 +64,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         # Initialize attributes that were missing in the original PR
         self.current_func_name: Optional[str] = None
+        self._stream_string: Optional[dict] = None
 
         # Hold the wrapper until its name is validated. Rejected examples must
         # survive as literal text, including markup received in earlier chunks.
@@ -75,6 +82,12 @@ class Qwen3CoderDetector(BaseFormatDetector):
         self._code_fence_length = 0
         self._code_fence_line_can_close = True
         self._stream_at_line_start = True
+
+        # Per-parameter flag for aggregate conversion-fallback accounting.
+        self._conversion_fallback = False
+        # Guards aggregate incomplete accounting against repeated flushes.
+        self._incomplete_recorded = False
+        self._superseded_incomplete_calls = 0
 
     def has_tool_call(self, text: str) -> bool:
         return self.tool_call_start_token in text
@@ -118,12 +131,38 @@ class Qwen3CoderDetector(BaseFormatDetector):
     def _is_declared_tool(self, func_name: str, tools: Optional[List[Tool]]) -> bool:
         if not tools or envs.SGLANG_FORWARD_UNKNOWN_TOOLS.get():
             return True
+        return self._tool_name_known(func_name, tools)
+
+    @staticmethod
+    def _tool_name_known(func_name: str, tools: Optional[List[Tool]]) -> bool:
+        """Name declared or not, ignoring the unknown-tool forwarding switch.
+
+        Only used for aggregate accounting, so a forwarded unknown tool stays
+        visible as an unknown_tool event.
+        """
         return any(
             tool.type == "function" and tool.function.name == func_name
-            for tool in tools
+            for tool in tools or []
         )
 
     def _convert_param_value(
+        self, param_value: str, param_name: str, param_config: dict, func_name: str
+    ) -> Any:
+        """Convert a parameter value and record one aggregate fallback event.
+
+        A value that fails several strategies (json.loads then literal_eval)
+        still counts once for that parameter.
+        """
+        self._conversion_fallback = False
+        converted = self._convert_param_value_typed(
+            param_value, param_name, param_config, func_name
+        )
+        if self._conversion_fallback:
+            self._conversion_fallback = False
+            record_tool_parser_event(TOOL_PARSER_ARGUMENT_CONVERSION_FAILED)
+        return converted
+
+    def _convert_param_value_typed(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
     ) -> Any:
         """Convert parameter value based on its type in the schema."""
@@ -156,6 +195,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     f"Parsed value '{param_value}' of parameter '{param_name}' is not an integer in tool "
                     f"'{func_name}', degenerating to string."
                 )
+                self._conversion_fallback = True
             return param_value
         elif param_type.startswith("num") or param_type.startswith("float"):
             try:
@@ -170,6 +210,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     f"Parsed value '{param_value}' of parameter '{param_name}' is not a float in tool "
                     f"'{func_name}', degenerating to string."
                 )
+                self._conversion_fallback = True
             return param_value
         elif param_type in ["boolean", "bool", "binary"]:
             param_value = param_value.lower()
@@ -177,6 +218,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 logger.warning(
                     f"Parsed value '{param_value}' of parameter '{param_name}' is not a boolean (`true` of `false`) in tool '{func_name}', degenerating to false."
                 )
+                self._conversion_fallback = True
             return param_value == "true"
         else:
             if (
@@ -192,12 +234,14 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         f"Parsed value '{param_value}' of parameter '{param_name}' cannot be parsed with json.loads in tool "
                         f"'{func_name}', will try other methods to parse it."
                     )
+                    self._conversion_fallback = True
             try:
                 param_value = safe_literal_eval(param_value)
             except Exception:
                 logger.warning(
                     f"Parsed value '{param_value}' of parameter '{param_name}' cannot be converted via Python `ast.literal_eval()` in tool '{func_name}', degenerating to string."
                 )
+                self._conversion_fallback = True
             return param_value
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
@@ -213,6 +257,29 @@ class Qwen3CoderDetector(BaseFormatDetector):
             complete_tool_calls = [
                 span for span in raw_tool_calls if span[1] != span[2]
             ]
+            if complete_tool_calls:
+                # A trailing unfinished wrapper stays prose when earlier calls
+                # are complete. Still account for a genuine unfinished function
+                # inside it without promoting that function into a tool call.
+                for tool_start, tool_end, content_end in raw_tool_calls:
+                    if tool_end != content_end:
+                        continue
+                    content = text[
+                        tool_start + len(self.tool_call_start_token) : content_end
+                    ]
+                    for start, end, body_end in self._iter_structure_spans(
+                        content, self.tool_call_prefix, self.function_end_token
+                    ):
+                        if end != body_end:
+                            continue
+                        name, separator, _ = content[
+                            start + len(self.tool_call_prefix) : body_end
+                        ].partition(">")
+                        if separator and name:
+                            if tools and not self._tool_name_known(name, tools):
+                                record_tool_parser_event(TOOL_PARSER_UNKNOWN_TOOL)
+                            if self._is_declared_tool(name, tools):
+                                record_tool_parser_event(TOOL_PARSER_INCOMPLETE)
             raw_tool_calls = complete_tool_calls or raw_tool_calls
 
             tool_idx = 0
@@ -243,6 +310,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                         logger.warning(
                             "Model attempted to call undefined function: %s", func_name
                         )
+                        record_tool_parser_event(TOOL_PARSER_UNKNOWN_TOOL)
                         continue
                     params_str = func_body[name_end + 1 :]
 
@@ -274,6 +342,16 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     )
                     tool_idx += 1
                     accepted_spans.append((func_start, func_end))
+                    record_tool_parser_event(TOOL_PARSER_ACCEPTED)
+                    if func_end == body_end == len(tool_content):
+                        # Accepted call whose own closing markup never arrived
+                        # (its wrapper or the response ended first); the
+                        # streaming path records the same shape at termination.
+                        record_tool_parser_event(TOOL_PARSER_INCOMPLETE)
+                    if tools and not self._tool_name_known(func_name, tools):
+                        # Undeclared name accepted because unknown-tool
+                        # forwarding is on; overlaps accepted by design.
+                        record_tool_parser_event(TOOL_PARSER_UNKNOWN_TOOL)
 
                 if accepted_spans and len(accepted_spans) == len(funcs):
                     self._pending_tool_separator = ""
@@ -295,6 +373,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")
+            record_tool_parser_event(TOOL_PARSER_PARSE_ERROR)
             return StreamingParseResult(normal_text=text)
 
     @staticmethod
@@ -453,7 +532,83 @@ class Qwen3CoderDetector(BaseFormatDetector):
             return False
         return all(char in " \t\r" for char in line[marker_end:])
 
+    def _emit_string_parameter(self, calls: List[ToolCallItem]) -> bool:
+        """Emit a declared string while retaining possible closing markup."""
+        state = self._stream_string
+        value = self._buffer[self.parsed_pos :]
+        if state["leading"] and value:
+            state["leading"] = False
+            if value.startswith("\n"):
+                self._advance_stream(1)
+                value = value[1:]
+
+        delimiters = (
+            (self.parameter_end_token, len(self.parameter_end_token)),
+            (self.parameter_prefix, 0),
+            (self.function_end_token, 0),
+        )
+        endings = [
+            (value.find(token), consume)
+            for token, consume in delimiters
+            if token in value
+        ]
+        complete = bool(endings)
+        if complete:
+            end, consume = min(endings)
+            chunk = value[:end]
+            if chunk.endswith("\n"):
+                chunk = chunk[:-1]
+            advance = end + consume
+        else:
+            # A trailing LF may be stripped on completion; a possible "null"
+            # and any split delimiter must also remain undecided until then.
+            keep = max(len(token) for token, _ in delimiters) + len("null")
+            advance = max(0, len(value) - keep)
+            if not advance:
+                return False
+            chunk = value[:advance]
+
+        fragment = ""
+        if not state["opened"]:
+            if not self.json_started:
+                fragment += "{"
+                self.json_started = True
+            if self.current_tool_param_count:
+                fragment += ", "
+            fragment += json.dumps(state["name"]) + ": "
+            if complete and chunk.lower() == "null":
+                fragment += "null"
+            else:
+                fragment += '"' + json.dumps(chunk, ensure_ascii=False)[1:-1]
+                if complete:
+                    fragment += '"'
+            state["opened"] = True
+        else:
+            fragment += json.dumps(chunk, ensure_ascii=False)[1:-1]
+            if complete:
+                fragment += '"'
+
+        if fragment:
+            calls.append(
+                ToolCallItem(tool_index=self.current_tool_id, parameters=fragment)
+            )
+        self._advance_stream(advance)
+        if complete:
+            self.current_tool_param_count += 1
+            self._stream_string = None
+        return complete
+
     def parse_streaming_increment(
+        self, new_text: str, tools: List[Tool]
+    ) -> StreamingParseResult:
+        """Record one parse_error event, then keep the original propagation."""
+        try:
+            return self._parse_streaming_increment_impl(new_text, tools)
+        except Exception:
+            record_tool_parser_event(TOOL_PARSER_PARSE_ERROR)
+            raise
+
+    def _parse_streaming_increment_impl(
         self, new_text: str, tools: List[Tool]
     ) -> StreamingParseResult:
         """
@@ -469,6 +624,11 @@ class Qwen3CoderDetector(BaseFormatDetector):
         normal_text_chunks = []
 
         while True:
+            if self._stream_string is not None:
+                if self._emit_string_parameter(calls):
+                    continue
+                break
+
             # Working text slice
             current_slice = self._buffer[self.parsed_pos :]
 
@@ -589,10 +749,17 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 if end_angle != -1:
                     func_name = current_slice[len(self.tool_call_prefix) : end_angle]
 
+                    # A later function can replace a still-open call. Remember
+                    # it before the native parser resets that state, but emit
+                    # incomplete outcomes only when the response terminates.
+                    if self.current_func_name is not None:
+                        self._superseded_incomplete_calls += 1
+
                     if not self._is_declared_tool(func_name, tools):
                         logger.warning(
                             "Model attempted to call undefined function: %s", func_name
                         )
+                        record_tool_parser_event(TOOL_PARSER_UNKNOWN_TOOL)
                         self._suppress_current_call = True
                         self._rejected_function_depth = 1
                         self._rejected_tool_depth = 0
@@ -632,6 +799,13 @@ class Qwen3CoderDetector(BaseFormatDetector):
                             parameters="",
                         )
                     )
+                    # One logical call here; the parameter fragments streamed
+                    # later for this call are not counted again.
+                    record_tool_parser_event(TOOL_PARSER_ACCEPTED)
+                    if tools and not self._tool_name_known(func_name, tools):
+                        # Undeclared name accepted because unknown-tool
+                        # forwarding is on; overlaps accepted by design.
+                        record_tool_parser_event(TOOL_PARSER_UNKNOWN_TOOL)
 
                     self._advance_stream(end_angle + 1)
                     continue
@@ -649,6 +823,22 @@ class Qwen3CoderDetector(BaseFormatDetector):
             ):
                 name_end = current_slice.find(">")
                 if name_end != -1:
+                    param_name = current_slice[
+                        len(self.parameter_prefix) : name_end
+                    ]
+                    param_config = self._get_arguments_config(
+                        self.current_func_name, tools
+                    )
+                    schema = param_config.get(param_name)
+                    if isinstance(schema, dict) and schema.get("type") == "string":
+                        self._stream_string = {
+                            "name": param_name,
+                            "opened": False,
+                            "leading": True,
+                        }
+                        self._advance_stream(name_end + 1)
+                        continue
+
                     value_start_idx = name_end + 1
                     rest_of_slice = current_slice[value_start_idx:]
 
@@ -851,6 +1041,18 @@ class Qwen3CoderDetector(BaseFormatDetector):
     def finish(self, tools: List[Tool]) -> StreamingParseResult:
         # Only flush unrecognized syntax. An unfinished accepted call must not
         # silently become prose or have fabricated argument-closing delimiters.
+        # Response termination is the only place an incomplete call is counted,
+        # and only for a call attempt: a bare wrapper with no function is
+        # returned as prose and is not an attempt, a partially received opening
+        # marker is still ambiguous markup, and a rejected unknown call was
+        # already counted as unknown_tool.
+        if not self._incomplete_recorded:
+            self._incomplete_recorded = True
+            incomplete_calls = self._superseded_incomplete_calls + int(
+                self.current_func_name is not None
+            )
+            for _ in range(incomplete_calls):
+                record_tool_parser_event(TOOL_PARSER_INCOMPLETE)
         chunks = []
         if self._code_fence_marker is not None:
             self._append_normal_text(self._buffer, chunks)

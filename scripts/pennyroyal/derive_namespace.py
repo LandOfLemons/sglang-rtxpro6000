@@ -136,6 +136,15 @@ def parse_fields(values: list[str]) -> dict[str, str]:
             raise ValueError(f"invalid field name: {name!r}")
         if name in fields:
             raise ValueError(f"duplicate field: {name}")
+        if name == "tp_size":
+            # TP topology must be real identity, not decoration: a missing or
+            # junk tp_size lets a TP1 and a TP2 launch share one namespace
+            # root, where NIXL FILE rank layout suffixes can collide. Fail
+            # closed (exit 2) instead of silently reusing the directory.
+            if not re.fullmatch(r"[1-9][0-9]*", field_value):
+                raise ValueError(
+                    f"tp_size field must be a positive integer, got {field_value!r}"
+                )
         fields[name] = field_value
     return fields
 
@@ -178,7 +187,44 @@ def namespace_name(slug: str, identity: dict[str, Any]) -> tuple[str, str]:
     return f"{readable}_{digest[:12]}", digest
 
 
+def _warn_if_cache_filesystem_full(root: Path) -> None:
+    """Best-effort early warning before any cache-path creation is attempted.
+
+    A full or inode-exhausted filesystem makes the fresh namespace ``mkdir`` /
+    manifest write below fail with a bare OSError; say what is wrong first,
+    with user-owned retired-cache guidance. Read-only: never fatal, never a
+    directory scan, never touches existing data (the actual create errors
+    still surface unchanged).
+    """
+    try:
+        probe = root
+        while not probe.exists():
+            parent = probe.parent
+            if parent == probe:
+                break
+            probe = parent
+        stat = os.statvfs(str(probe))
+        frsize = stat.f_frsize or stat.f_bsize
+        total = stat.f_blocks * frsize
+        if (total > 0 and stat.f_bavail * frsize == 0) or (
+            stat.f_files > 0 and stat.f_favail == 0
+        ):
+            print(
+                f"derive_namespace: warning: the filesystem holding cache path "
+                f"{root} is full (no blocks or inodes free; probed {probe}); "
+                "creating the new cache namespace may fail. Retired-cache "
+                "cleanup is owned by the user: free space by removing only "
+                "old cache namespaces known to be unused; leave active cache "
+                "paths untouched.",
+                file=sys.stderr,
+            )
+    except OSError:
+        # Warning inspection is best-effort; creation errors still surface.
+        pass
+
+
 def ensure_manifest(root: Path, identity: dict[str, Any], digest: str) -> None:
+    _warn_if_cache_filesystem_full(root)
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / MANIFEST_NAME
     manifest = {"identity_sha256": digest, "identity": identity}
@@ -190,8 +236,17 @@ def ensure_manifest(root: Path, identity: dict[str, Any], digest: str) -> None:
         try:
             current = json.loads(manifest_path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"invalid namespace manifest: {manifest_path}") from exc
+            # A half-written manifest must not turn into a silent purge or a
+            # blind share of whatever files already live in this directory.
+            raise RuntimeError(
+                f"unreadable namespace manifest (fail closed; no data removed): "
+                f"{manifest_path}"
+            ) from exc
         if current != manifest:
+            # The directory name is only the digest prefix; a manifest that
+            # disagrees with the derived identity means this root belongs to
+            # another representation/TP layout. Refuse it, keep every
+            # existing cache file exactly where it is.
             raise RuntimeError(
                 f"namespace manifest does not match derived identity: {manifest_path}"
             )

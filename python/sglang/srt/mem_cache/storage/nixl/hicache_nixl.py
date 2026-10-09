@@ -20,10 +20,19 @@ from sglang.srt.mem_cache.hicache_storage import (
 )
 from sglang.srt.mem_cache.pool_host import HostKVCache
 from sglang.srt.mem_cache.storage.mmap import alloc_mmap
-from sglang.srt.mem_cache.storage.nixl.nixl_cleaner import HiCacheL3Cleaner
+from sglang.srt.mem_cache.storage.nixl.nixl_cleaner import (
+    GIBIBYTE,
+    HiCacheL3Cleaner,
+    warn_on_cache_filesystem_pressure,
+)
 
+from .namespace_layout import verify_derived_namespace_layout
 from .nixl_registry import NixlRegistry
-from .nixl_utils import NixlBackendConfig, NixlBackendSelection, NixlFileManager
+from .nixl_utils import (
+    NixlBackendConfig,
+    NixlBackendSelection,
+    NixlFileManager,
+)
 
 try:
     from nixl._api import nixl_agent, nixl_agent_config, nixlBind
@@ -90,6 +99,24 @@ class HiCacheNixl(HiCacheStorage):
         storage_dirs = _parse_storage_dirs(
             envs.SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR.get() or file_path
         )
+        verify_derived_namespace_layout(
+            storage_dirs, storage_config.tp_size
+        )
+        # Startup-only, read-only filesystem pressure warning, logged before
+        # the file manager (re-)creates base/bucket directories so a full or
+        # inode-exhausted fresh namespace explains itself before any mkdir can
+        # fail. Independent of whether the automatic cleaner is enabled (users
+        # own retired-cache cleanup and may disable it) and never fatal.
+        # Rank 0 only, mirroring HiCacheL3Cleaner.start, to avoid
+        # duplicated-rank spam; the helper logs at most once per filesystem.
+        if (
+            storage_config.tp_rank == 0
+            and plugin not in NixlBackendSelection.OBJ_PLUGINS
+        ):
+            warn_on_cache_filesystem_pressure(
+                storage_dirs,
+                nixlconfig.get_l3_cleaner_config()["high_watermark"],
+            )
         self.file_manager = (
             NixlFileManager(storage_dirs, use_direct_io=use_direct_io)
             if plugin not in NixlBackendSelection.OBJ_PLUGINS
@@ -173,6 +200,7 @@ class HiCacheNixl(HiCacheStorage):
                 tp_rank,
                 high_watermark=cleaner_config["high_watermark"],
                 low_watermark=cleaner_config["low_watermark"],
+                max_cache_bytes=cleaner_config["max_cache_gb"] * GIBIBYTE,
             )
             if (
                 cleanup_dirs
@@ -509,6 +537,9 @@ class HiCacheNixl(HiCacheStorage):
             host_pool, "get_storage_component_names", lambda: None
         )()
         if component_names:
+            # Actual component inventory from the host pool (temporal, conv,
+            # slot siblings); the ad-hoc counts below ignore slot_sibling_specs
+            # and would desync keys from get_page_buffer_meta() pointers.
             return len(component_names)
         if pool_name == PoolName.MAMBA:
             return 1 + len(getattr(host_pool, "conv_buffer", []) or [])

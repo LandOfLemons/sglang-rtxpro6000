@@ -9,6 +9,38 @@ Build the release with [BUILD.md](BUILD.md) first. Container users should
 follow the separate [Docker and Compose guide](docker/pennyroyal/README.md).
 Pennyroyal does not include a native systemd service file.
 
+## Configure and run
+
+The optional setup assistant is **beta**; [CONFIGURE.md](CONFIGURE.md) walks
+through setup, the main choices, and saved settings. The existing direct
+launchers remain available below if you prefer manual configuration.
+
+After building Pennyroyal and downloading your model, run this from the checkout:
+
+```bash
+./configure-penny --native
+./run-penny --check
+./run-penny
+```
+
+Setup asks for the model, cache locations, and GPU, then shows your choices
+before saving. Next needs one target checkpoint; 27B also needs its DFlash2
+draft. Leave advanced settings alone to use the normal recipe defaults.
+Create any missing cache directories shown by the check before starting.
+
+Settings are saved in `~/.config/pennyroyal/pennyroyal.env`. Rerun setup to
+change them, or edit the file directly. `./run-penny --show-config` shows the
+selected configuration without loading a model. For separate saved profiles,
+pass `--config /absolute/path/to/next.env` to both setup and launch.
+
+The setup utility needs Python 3 but no model packages or GPU to validate
+configuration. It does not install dependencies, download models, start the
+server, or delete caches. The normal launcher still checks the runtime and
+checkpoint when starting. Stop and restart the server to apply changes.
+
+Prefer shell exports or an existing service? The direct launchers below still
+work; the setup utility is optional.
+
 ## Common setup
 
 Set the repository, compiler-cache, and persistent-cache roots. The launchers
@@ -96,7 +128,7 @@ export DRAFT_MODEL=/path/to/incoai-Qwen3.8-27B-DFlash2
 | Recurrent / convolution state | FP32 GDN SSM / BF16 convolution |
 | DFlash2 shape | 8 draft tokens; 2,048-token window |
 | Attention | TRTLLM-MHA/XQA target decode; FlashInfer target prefill and draft attention; Triton GDN |
-| State and host cache | 24 Mamba slots; 5 retained states per path; 96 GiB HiCache; NIXL POSIX |
+| State and host cache | 24 Mamba slots; 5 retained states per path; 96 GB HiCache by default; NIXL POSIX |
 
 The target is a dense FP8 model; Flash-Next's routed-expert settings do not
 apply.
@@ -105,7 +137,7 @@ Run one profile at a time on a single GPU.
 
 ### Unknown tool names
 
-The qualified launchers default `SGLANG_FORWARD_UNKNOWN_TOOLS=true`. A native
+The launchers default `SGLANG_FORWARD_UNKNOWN_TOOLS=true`. A native
 tool call whose name is absent from the request's tool definitions reaches the
 API consumer's executor, which can return an error for the model to correct and
 retry. Markdown fenced tool examples remain text, and forwarding does not
@@ -137,8 +169,8 @@ normal request cleanup.
 
 | Profile | Configured host cache | Additional host use |
 |---|---:|---|
-| Flash-Next | 32 GiB HiCache | Approximately 47.68 GiB for RAM-backed PLE |
-| 27B/DFlash2 | 96 GiB HiCache | Model loading and runtime overhead |
+| Flash-Next | 32 GB HiCache | Approximately 47.68 GiB for RAM-backed PLE |
+| 27B/DFlash2 | 96 GB HiCache | Model loading and runtime overhead |
 
 Process, driver, filesystem, and page-cache memory are additional. NVMe-backed
 PLE removes Flash-Next's fixed table residency and uses SSD I/O plus reclaimable
@@ -157,9 +189,26 @@ One built-in JSON-schema warmup runs before readiness. It exercises a stable
 grammar/mask path; other schemas, long prefill, media, and concurrency shapes
 warm when used.
 
-This page covers the qualified native launchers. For the qualified container
+This page covers the native launchers. For the container
 path, use [`docker/pennyroyal`](docker/pennyroyal/README.md); other Docker files
 inherited from upstream serve their upstream purposes.
+
+## WSL2 host-memory workaround
+
+For WSL2, enable the pinned-memory workaround before launching either profile
+directly with its recipe:
+
+```bash
+export SGLANG_HICACHE_TORCH_PINNED_ALLOC=true
+```
+
+This addresses illegal memory accesses during HiCache transfers caused by
+WSL2's handling of CUDA host-memory pointers. It is off by default; leave it
+off on native Linux. If you use `run-penny` with a saved configuration, set
+`SGLANG_HICACHE_TORCH_PINNED_ALLOC=true` in that file: saved settings take
+precedence over shell exports. In the beta configurator, choose **WSL2
+host-memory workaround** under **Advanced**. For Docker Compose, set the same variable in
+your `.env` file using the [container instructions](docker/pennyroyal/README.md#wsl2).
 
 ## Startup checks
 
@@ -191,9 +240,10 @@ For Flash-Next, confirm:
 - recovery graphs for batch sizes 1-4 by default, or 1-6 with C6; and
 - attached KV, Mamba/PLE, and QSA HiCache pools.
 
-With online FP8, also confirm MXFP8 projection signatures and the row-wise HC
-mix and output-head weights. With NVMe PLE, confirm the prepared-table checksum,
-plugin registration, SSD reader, and separate NIXL namespace. An explicit
+With online FP8 active, also confirm the row-wise FP8 projection signatures
+and the row-wise HC mix and output-head weights. With NVMe PLE, confirm the
+prepared-table checksum, plugin registration, SSD reader, and separate NIXL
+namespace. An explicit
 `MAX_TOTAL_TOKENS` value is a request; the resolved KV capacity is the result.
 
 For 27B, confirm:
@@ -210,6 +260,29 @@ For 27B, confirm:
 
 ## Distinguish cache paths
 
+### Choose HiCache RAM size
+
+Set `PENNY_HICACHE_SIZE_GB` to the amount of system RAM to use for conversation
+cache. It accepts whole GB starting at `1`; leave it blank or unset for the
+existing defaults of 32 GB for Next and 96 GB for 27B. Pool alignment and runtime
+overhead are additional, as are model loading and RAM-backed PLE.
+
+Smaller settings leave less room for reused conversation state. They do not
+disable HiCache or NIXL, and they do not limit the GPU KV pool.
+
+### Limit NIXL disk use
+
+Set `SGLANG_HICACHE_NIXL_MAX_CACHE_GB=200` in your saved config, Compose `.env`,
+or environment before launching to give the active NIXL cache a 200 GiB
+budget. The setup utility asks about this too. Zero or unset disables it.
+
+This is a periodic cleanup target, not a hard disk quota: writes can briefly
+exceed it, and cleanup aims for 90% of the budget. Existing filesystem-space
+watermarks still apply. It covers the active cache namespace, not old caches
+left by other versions or configurations. No model files are removed.
+
+### Cache reuse
+
 - **Cold prefill:** no matching GPU radix prefix and no matching NIXL object;
   logs show most tokens as newly computed.
 - **Radix reuse:** the same server process retains the prefix in GPU/host state;
@@ -224,24 +297,34 @@ after relevant configuration or source changes.
 
 ## Optional Flash-Next precision and PLE placement
 
-The two v2.5.0 options are independent. The default recipe uses the original
-checkpoint precision and RAM-backed PLE:
+Both Flash-Next recipes export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`, which selects
+the FP16-accumulate MMA mode of the patched FlashInfer SM12x delta-rule prefill
+kernels (see
+[FlashInfer SM120 source integration](BUILD.md#flashinfer-sm120-source-integration)).
+The mode is part of the qualified Next profile: export
+`FLASHINFER_GDN_FP16_ACCUM_MMA=0` before launch, or change the line in the
+recipe or the mounted startup script, to run the kernels exactly as released.
+FlashInfer's own default stays off, the 27B/DFlash2 recipe never sets the
+variable, and its Triton GDN path and numerics are unchanged. The resolved mode is
+one of the NIXL namespace fields, so the two modes use separate persistent roots:
+nothing is deleted, and the root you leave behind stays as ordinary user-owned
+cache.
+
+Online FP8 is the automatic default of the Flash-Next recipes on exact SM120:
+a fresh or default launch needs no kernel switch. The saved private override
+`SGLANG_SM120_ONLINE_MXFP8=false` pins the original checkpoint path (and
+`=true` forces the conversion where eligibility would stay off); read
+[FP8.md](FP8.md) before using either. PLE placement stays a separate, explicit
+choice; the default recipe uses RAM-backed PLE:
 
 ```bash
-unset SGLANG_SM120_ONLINE_MXFP8
 export PENNY_PLE_BACKEND=ram
-```
-
-Enable exact-SM120 online FP8 with a literal `true`:
-
-```bash
-export SGLANG_SM120_ONLINE_MXFP8=true
 ```
 
 This converts eligible otherwise-BF16 transformer projections, HC mix weights,
 and the output head during loading. NVFP4 experts, routers, and PLE remain in
 their checkpoint formats; GDN state remains BF16, KV remains FP8, and FR-Spec
-alignment is unchanged. Read [FP8.md](FP8.md) before enabling it.
+alignment is unchanged.
 
 To stream the PLE table from a prepared local SSD overlay:
 
@@ -258,7 +341,7 @@ placement can be combined with online FP8.
 filesystem. Review them for your storage.
 
 The [map builder](scripts/pennyroyal/frspec/build_token_map.py) supports a
-different tokenizer or corpus. The bundled map defines the qualified FR-Spec
+different tokenizer or corpus. The bundled map defines the default FR-Spec
 profile; a new map gets its own validation and cache namespace. See
 [PROVENANCE.md](PROVENANCE.md#v23-fr-spec-provenance) for hashes and source
 details.
@@ -279,9 +362,9 @@ JPEG and static video checks, and three image-history turns around 208K
 context. Post-graph free memory was 5.21 GiB; the lowest media sample was
 1,187 MiB.
 
-The option changes KV capacity. Context remains 524,288 tokens, and no speed
-comparison was run. Model-GPU media preprocessing was not tested with this
-pool. Unset `MAX_TOTAL_TOKENS` to return to the 824,384-token FR-Spec default.
+The option changes KV capacity; context remains 524,288 tokens. Use CPU media
+preprocessing with this pool to leave more GPU memory for requests.
+Unset `MAX_TOTAL_TOKENS` to return to the 824,384-token FR-Spec default.
 The non-FR recipe uses automatic sizing when unset and accepts the same kind of
 page-aligned override. See
 [RESULTS.md](RESULTS.md#explicit-1000000-token-capacity-option) for timings.
@@ -294,7 +377,6 @@ FR-Spec defaults remain four requests, 24 Mamba slots, and 824,384 KV tokens. Se
 C6 values before launching either Flash-Next recipe:
 
 ```bash
-export SGLANG_SM120_ONLINE_MXFP8=true
 export SGLANG_MM_PREPROCESS_DEVICE=cpu
 export MAX_RUNNING_REQUESTS=6
 export MAX_MAMBA_CACHE_SIZE=36
@@ -332,7 +414,7 @@ export TARGET_MODEL=/path/to/RadixArk-Qwen3.8-Flash-Next-NVFP4
 | Target/native-MTP KV | FP8 E4M3 |
 | Speculation and context | Native NEXTN; 524,288-token YaRN context |
 | State and host cache | 24 Mamba slots; RecoverSSM `none`; 32 GiB HiCache; NIXL POSIX |
-| Linear attention | Explicit FlashInfer GDN decode/prefill |
+| Linear attention | Explicit FlashInfer GDN decode/prefill, FP16-accumulate MMA mode |
 
 The online-FP8 and PLE-placement options also apply to this recipe.
 
@@ -411,8 +493,34 @@ restore NumPy's huge-page requests. NumPy reads the setting at import, so a
 change requires a server restart. A host-wide `always` policy can still supply
 huge pages.
 
+Both Flash-Next recipes export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`, the accepted
+FP16-accumulate MMA mode of the patched FlashInfer SM12x delta-rule prefill
+kernels ([BUILD.md](BUILD.md#flashinfer-sm120-source-integration)). Export
+`FLASHINFER_GDN_FP16_ACCUM_MMA=0` before startup to opt out; in a container
+setup, saving or exporting that value reaches the generated launch the same way
+the other forwarded knobs do. FlashInfer's own default is off, the 27B/DFlash2
+recipe never sets it, and no other profile's numerics change. The recipes export
+it before the server starts, so changing it requires a restart, and the resolved
+mode is part of the NIXL cache identity.
+
 For Pennyroyal's thinking-enabled agentic use, the launcher defaults to medium
 reasoning effort. Chat Completions `reasoning_effort` takes precedence over
 that default. With Froggeric v22.5, `high`, `xhigh`, and `max` select the same
 xhigh instruction, which can change answer length relative to medium.
 Responses API precedence is unchanged.
+
+To change the launcher default itself (PR#18), export
+`PENNY_REASONING_EFFORT=none|minimal|low|medium|high|xhigh|max` before
+starting a recipe; unset or empty keeps the default medium. The recipes
+build `--default-chat-template-kwargs` from that single value, the server
+never reads the variable, and an invalid tier stops the launch.
+
+TP2 verification is pending from
+[u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).
+Natively, `TP_SIZE=2` makes the Next recipes claim GPUs 0..TP_SIZE-1 when
+`CUDA_VISIBLE_DEVICES` is unset, but it does not grant GPU access: the
+launch aborts with the visible-device count if fewer devices are visible
+than TP (plus a dedicated `SGLANG_MM_PREPROCESS_DEVICE=cuda:N`) requires.
+In Docker/Compose the same `TP_SIZE=2` also needs the existing
+`deploy.resources.reservations.devices` entry edited to name both GPU ids,
+for example `device_ids: ["0", "1"]`; see docker/pennyroyal/README.md.
