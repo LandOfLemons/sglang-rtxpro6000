@@ -548,6 +548,25 @@ class ResumeLeaseTests(unittest.TestCase):
         self.assertEqual(branch.component_data[MAMBA].host_lock_ref, 1)
         self.assertEqual(shared.component_data[MAMBA].host_lock_ref, 1)
 
+    def test_a_durable_re_insert_settles_every_pending_owner(self):
+        first = self._open("a")
+        second = self._open("b")
+        node = self._add(_node(1, self.root, host=False))
+        node.component_data[MAMBA].value = [1]
+        self.comp._note_inserted_resume(self._req("a", first), self._insert(node))
+        self.comp._note_inserted_resume(self._req("b", second), self._insert(node))
+        self.assertEqual(
+            self.comp._pending_resume_backup[node.id], {"a": first, "b": second}
+        )
+        node.component_data[MAMBA].host_value = [1]
+
+        # Only a finishes again on the now durable node; b keeps its promise.
+        self.comp._note_inserted_resume(self._req("a", first), self._insert(node))
+        self.assertEqual(self.comp._resume_pins["a"], {"commit": node.id})
+        self.assertEqual(self.comp._resume_pins["b"], {"commit": node.id})
+        self.assertEqual(node.component_data[MAMBA].host_lock_ref, 2)
+        self.assertNotIn(node.id, self.comp._pending_resume_backup)
+
 
 if __name__ == "__main__":
     unittest.main()

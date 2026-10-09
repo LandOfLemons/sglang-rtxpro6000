@@ -312,6 +312,20 @@ class MambaComponent(TreeComponent):
         if not already:
             self._lease_log("acquire", pin, session_id, node)
 
+    def _promote_pending_backup(self, node: UnifiedTreeNode, *, durable: bool) -> None:
+        """Settle every owner waiting on this node's host backup.
+
+        Pending ownership is per session, so a backup settles them all and one
+        session's re-insert must not silently drop the others' promise.
+        """
+        owners = self._pending_resume_backup.pop(node.id, None) or {}
+        tracker = self._resume_tracker()
+        if not durable or tracker is None:
+            return
+        for session_id, generation in owners.items():
+            if tracker.pin_still_current(session_id, generation):
+                self._pin_resume(session_id, node, "commit")
+
     def _note_inserted_resume(
         self,
         req: Optional[Req],
@@ -334,7 +348,7 @@ class MambaComponent(TreeComponent):
         if cd.host_value is None and cd.value is None:
             return
         if cd.host_value is not None:
-            self._pending_resume_backup.pop(node.id, None)
+            self._promote_pending_backup(node, durable=True)
             self._pin_resume(session_id, node, "commit")
             return
         self._pending_resume_backup.setdefault(node.id, {})[session_id] = (
@@ -1324,14 +1338,9 @@ class MambaComponent(TreeComponent):
                 cd = node.component_data[ct]
                 if cd.host_value is None:
                     cd.host_value = transfers[0].host_indices.clone()
-                pending = self._pending_resume_backup.pop(node.id, None)
-                if pending and cd.host_value is not None:
-                    tracker = self._resume_tracker()
-                    for session_id, generation in pending.items():
-                        if tracker is not None and tracker.pin_still_current(
-                            session_id, generation
-                        ):
-                            self._pin_resume(session_id, node, "commit")
+                self._promote_pending_backup(
+                    node, durable=cd.host_value is not None
+                )
 
         elif phase == CacheTransferPhase.LOAD_BACK:
             if not transfers:
