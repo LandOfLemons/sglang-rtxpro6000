@@ -923,7 +923,9 @@ class Scheduler(
         # Initialize GEMM-related configuration for FP8 and FP4 backends.
         initialize_fp8_gemm_config()
         initialize_fp4_gemm_config()
-        initialize_bf16_gemm_config(self.server_args)
+        # The online-FP8 default selection needs the actual loaded model
+        # metadata (not a filename) to decide Flash-Next eligibility.
+        initialize_bf16_gemm_config(self.server_args, model_config=self.model_config)
 
         # This must be called after initialize_moe_config
         self.require_mlp_sync = require_mlp_sync()

@@ -217,9 +217,7 @@ def test_postprocess_resident_format_is_rowwise_fp8(loaded_layer):
     # (weight is the [K, N] view, so dequant[k, n] ~ orig[n, k]).
     orig = loaded_layer_orig(loaded_layer).float()
     scale = orig.abs().amax(dim=1, keepdim=True).clamp_min(1e-8) / 448.0
-    ref = (
-        (orig / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * scale
-    )
+    ref = (orig / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * scale
     dequant = weight.float() * scale.reshape(1, -1)
     torch.testing.assert_close(dequant, ref.t(), rtol=1e-6, atol=1e-6)
 
@@ -426,9 +424,12 @@ def test_env_can_only_shrink_the_row_budget(loaded_layer, monkeypatch, sm120_onl
     assert method._w8a16_gemv_ok(loaded_layer, x16) is False
     _gemv_env(monkeypatch, on=True, max_m=64)
     assert method._w8a16_gemv_ok(loaded_layer, x16) is True
-    assert method._w8a16_gemv_ok(
-        loaded_layer, torch.zeros(17, HIDDEN, dtype=torch.bfloat16)
-    ) is False
+    assert (
+        method._w8a16_gemv_ok(
+            loaded_layer, torch.zeros(17, HIDDEN, dtype=torch.bfloat16)
+        )
+        is False
+    )
 
 
 def test_gate_declines_nonconforming_activations(
@@ -436,16 +437,22 @@ def test_gate_declines_nonconforming_activations(
 ):
     monkeypatch.setenv(GEMV_ENV, "1")
     method = loaded_layer.quant_method
-    assert method._w8a16_gemv_ok(
-        loaded_layer, torch.zeros(4, HIDDEN)
-    ) is False  # fp32 activation, not the BF16 contract
-    assert method._w8a16_gemv_ok(
-        loaded_layer, torch.zeros(1, 4, HIDDEN, dtype=torch.bfloat16)
-    ) is False  # 3-D activation: x.dim() == 2 is the donor contract
+    assert (
+        method._w8a16_gemv_ok(loaded_layer, torch.zeros(4, HIDDEN)) is False
+    )  # fp32 activation, not the BF16 contract
+    assert (
+        method._w8a16_gemv_ok(
+            loaded_layer, torch.zeros(1, 4, HIDDEN, dtype=torch.bfloat16)
+        )
+        is False
+    )  # 3-D activation: x.dim() == 2 is the donor contract
     monkeypatch.delenv(GEMV_ENV, raising=False)
-    assert method._w8a16_gemv_ok(
-        loaded_layer, torch.zeros(4, HIDDEN, dtype=torch.bfloat16)
-    ) is False  # opt-in off
+    assert (
+        method._w8a16_gemv_ok(
+            loaded_layer, torch.zeros(4, HIDDEN, dtype=torch.bfloat16)
+        )
+        is False
+    )  # opt-in off
 
 
 @pytest.fixture
@@ -460,9 +467,7 @@ def test_gemv_call_signature_carries_the_resident_bytes(
     x = torch.zeros(4, HIDDEN, dtype=torch.bfloat16)
     bias = torch.ones(HIDDEN, dtype=torch.bfloat16)
     out = loaded_layer.quant_method.apply(loaded_layer, x, bias=bias)
-    assert probe.calls == [
-        ((4, HIDDEN), (HIDDEN, HIDDEN), (HIDDEN, 1), (1, HIDDEN))
-    ]
+    assert probe.calls == [((4, HIDDEN), (HIDDEN, HIDDEN), (HIDDEN, 1), (1, HIDDEN))]
     torch.testing.assert_close(out, bias.expand(4, HIDDEN))
     # bias semantics: no bias means the raw GEMV result
     out = loaded_layer.quant_method.apply(loaded_layer, x)
@@ -505,9 +510,7 @@ def test_apply_norm_gated_declines_off_contract(
     method = loaded_layer.quant_method
     x, z, w_norm = _norm_inputs()
     # CPU activation: the real donor support helper requires x.is_cuda.
-    assert (
-        method.apply_norm_gated(loaded_layer, x, z, w_norm, 128, 1e-6) is None
-    )
+    assert method.apply_norm_gated(loaded_layer, x, z, w_norm, 128, 1e-6) is None
     # bias is not fused into the norm prologue.
     assert (
         method.apply_norm_gated(
@@ -524,7 +527,7 @@ def test_apply_norm_gated_forwards_the_full_contract(
     loaded_layer, sm120_online, monkeypatch
 ):
     _gemv_env(monkeypatch, on=True)
-    monkeypatch.setattr(w8a16_gemv_module, "NORM_INTO_GEMV", True)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: True)
     # the real support helper is CPU-declining (x.is_cuda); its full truth
     # table is donor-AST-identical and covered on-GPU -- forward it here.
     monkeypatch.setattr(
@@ -633,9 +636,9 @@ def test_fused_caller_requires_flag_device_and_method(monkeypatch):
     fused = Qwen3_5GatedDeltaNet._norm_out_proj_fused
 
     monkeypatch.setattr(qwen3_5_module, "_is_cuda", True)
-    monkeypatch.setattr(qwen3_5_module, "_NORM_INTO_GEMV", False)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: False)
     assert fused(self, core, z, og) is None and rec.calls == []
-    monkeypatch.setattr(qwen3_5_module, "_NORM_INTO_GEMV", True)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: True)
     monkeypatch.setattr(qwen3_5_module, "_is_cuda", False)
     assert fused(self, core, z, og) is None and rec.calls == []
 
@@ -648,9 +651,35 @@ def test_fused_caller_requires_flag_device_and_method(monkeypatch):
     assert fused(none_method, core, z, og) is None
 
 
+def test_norm_fusion_gate_tracks_default_selection_without_copied_flags(monkeypatch):
+    # The two gates (models/qwen3_5.py and w8a16_gemv) resolve through one
+    # call-time function: no import-order pinning, and an eligible automatic
+    # selection enables the fusion without any operator-copied switch, while a
+    # saved explicit false keeps the original separate norm + out_proj path.
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import configure_online_fp8
+
+    monkeypatch.delenv("SGLANG_NORM_INTO_GEMV", raising=False)
+    configure_online_fp8(False, cuda_available=False, capability=None)
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is False
+    configure_online_fp8(
+        None, cuda_available=True, capability=(12, 0), model_eligible=True
+    )
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is True
+    monkeypatch.setenv("SGLANG_NORM_INTO_GEMV", "0")
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is False
+    monkeypatch.delenv("SGLANG_NORM_INTO_GEMV")
+    configure_online_fp8(
+        False, cuda_available=True, capability=(12, 0), model_eligible=True
+    )
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is False
+    monkeypatch.setenv("SGLANG_NORM_INTO_GEMV", "1")
+    assert w8a16_gemv_module.norm_into_gemv_enabled() is True
+    configure_online_fp8(False, cuda_available=False, capability=None)
+
+
 def test_fused_caller_contract_guards(monkeypatch):
     monkeypatch.setattr(qwen3_5_module, "_is_cuda", True)
-    monkeypatch.setattr(qwen3_5_module, "_NORM_INTO_GEMV", True)
+    monkeypatch.setattr(w8a16_gemv_module, "norm_into_gemv_enabled", lambda: True)
     fused = Qwen3_5GatedDeltaNet._norm_out_proj_fused
 
     ok = _RecordingNormMethod(result=torch.zeros(2, HIDDEN))

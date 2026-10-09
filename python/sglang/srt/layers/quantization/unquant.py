@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +156,9 @@ def _log_bf16_gemm_shape(m: int, n: int, k: int) -> None:
         logger.info("BF16_GEMM_SHAPE m=%d n=%d k=%d", m, n, k)
 
 
-def initialize_bf16_gemm_config(server_args: ServerArgs) -> None:
+def initialize_bf16_gemm_config(
+    server_args: ServerArgs, model_config: Any | None = None
+) -> None:
     global _BF16_GEMM_BACKEND, _cutedsl_bf16_gemm, _use_cutedsl_bf16_gemm
     global _flashinfer_pr4266_run_splitk_dense, _flashinfer_pr4266_splitk_tactic
     global _enable_bf16_splitk_gemm
@@ -218,21 +220,30 @@ def initialize_bf16_gemm_config(server_args: ServerArgs) -> None:
         _enable_bf16_splitk_gemm = True
         _precompile_splitk_tactics()
 
-    if envs.SGLANG_SM120_ONLINE_MXFP8.get():
-        from sglang.kernels.ops.gemm.sm120_online_fp8 import configure_online_fp8
+    # Accepted Flash-Next SM120 rowwise-FP8 path: an unset/blank request
+    # selects automatically from the actual loaded checkpoint metadata and the
+    # actual device capability; saved explicit true/false values propagate
+    # unchanged, and an explicit unsupported request still fails the boot.
+    from sglang.kernels.ops.gemm.sm120_online_fp8 import (
+        configure_online_fp8,
+        flash_next_metadata,
+    )
 
-        configure_online_fp8(
-            True,
-            cuda_available=torch.cuda.is_available(),
-            capability=(
-                torch.cuda.get_device_capability()
-                if torch.cuda.is_available()
-                else None
-            ),
-        )
+    hf_config = getattr(model_config, "hf_config", None) if model_config else None
+    request = envs.SGLANG_SM120_ONLINE_MXFP8.get()
+    if configure_online_fp8(
+        request,
+        cuda_available=torch.cuda.is_available(),
+        capability=(
+            torch.cuda.get_device_capability() if torch.cuda.is_available() else None
+        ),
+        model_eligible=hf_config is not None and flash_next_metadata(hf_config),
+    ):
         logger.info(
-            "Flash-Next online FP8 enabled on SM120: eligible BF16 linears, "
-            "HyperConnection mix and lm_head all use rowwise (per-output-channel) FP8"
+            "Flash-Next online FP8 enabled on SM120 (%s): eligible BF16 "
+            "linears, HyperConnection mix and lm_head all use rowwise "
+            "(per-output-channel) FP8",
+            "automatic default selection" if request is None else "explicit request",
         )
 
     _BF16_GEMM_BACKEND = backend
