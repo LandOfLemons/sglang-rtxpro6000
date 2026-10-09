@@ -46,6 +46,14 @@ GDN_RESOLVE = (
 )
 GDN_FIELD = '--field "gdn_fp16_accum_mma=$GDN_FP16_ACCUM_MMA" \\'
 DIGEST = re.compile(r"\A[0-9a-f]{64}\Z")
+COMPAT = "patches/asan-include-compat.patch"
+COMPAT_PATH = "flashinfer/data/csrc/nv_internal/cpp/common/memoryUtils.cu"
+# The stock and guarded bytes of that one file, repinned from the wheel.
+COMPAT_STOCK_SHA256 = "b4d493f293db5b0294272ef6a3ad7821fbda3c42ce66ea57268da87f3f24e5ad"
+COMPAT_ACCEPTED_SHA256 = (
+    "a8c8945ed2c8a5ede9026127f5f923a27bb206ca532c12bed48c22e3df0f1ae8"
+)
+COMPAT_COMMIT = "c84ae2ff261d08bb212f5d72867185876d9d71e7"
 
 
 def installer():
@@ -63,9 +71,21 @@ def digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def installed_tree(root: Path, contents: dict, version: str) -> Path:
-    """A stand-in site-packages: the package, its metadata, the given sources."""
+GUARD_STOCK = "#include <unused.h>\nint guard;\n"
+GUARD_ACCEPTED = "#if 0\n#include <unused.h>\n#endif\nint guard;\n"
+
+
+def installed_tree(
+    root: Path, contents: dict, version: str, guard: str = GUARD_STOCK
+) -> Path:
+    """A stand-in site-packages: the package, its metadata, the given sources.
+
+    `guard` is the sibling file the second generated set covers, written one level
+    above the package, where the compatibility guard's paths live.
+    """
     package = root / "flashinfer"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "guard.cu").write_text(guard)
     for name, content in contents.items():
         target = package / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -77,11 +97,13 @@ def installed_tree(root: Path, contents: dict, version: str) -> Path:
 
 
 def synthetic_source(root: Path) -> dict:
-    """A generated mailbox over a generated file, pinned the accepted way.
+    """The carried source sets, over generated files, pinned the accepted way.
 
-    The carried mailboxes cover six real FlashInfer files; every packaging rule
-    below is per file, so a two-line stand-in exercises the stock, accepted and
-    unexpected states without a wheel download.
+    The real mailboxes cover seven FlashInfer files; every packaging rule below is
+    per file and per set, so two-line stand-ins exercise the stock, accepted and
+    unexpected states without a wheel download. The second stand-in is rooted one
+    level up, like the carried compatibility guard, so the install-path adaptation
+    of both roots is covered.
     """
     patch = root / "generated-source.patch"
     patch.write_text(
@@ -100,6 +122,24 @@ def synthetic_source(root: Path) -> dict:
         "-- \n"
         "2.56.0\n"
     )
+    (root / "generated-guard.patch").write_text(
+        "From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001\n"
+        "From: Penny <Pennyroyal@agentmail.to>\n"
+        "Subject: [PATCH] test: the generated build-only guard\n"
+        "\n"
+        "---\n"
+        "diff --git a/guard.cu b/guard.cu\n"
+        "--- a/guard.cu\n"
+        "+++ b/guard.cu\n"
+        "@@ -1,2 +1,4 @@\n"
+        "-#include <unused.h>\n"
+        "+#if 0\n"
+        "+#include <unused.h>\n"
+        "+#endif\n"
+        " int guard;\n"
+        "-- \n"
+        "2.56.0\n"
+    )
     return {
         "flashinfer_python": "9.9.9",
         "flashinfer_jit_cache": "9.9.9+cu130",
@@ -112,6 +152,8 @@ def synthetic_source(root: Path) -> dict:
                 "root": ".",
                 "author": "Test <test@example.com>",
                 "commits": ["0" * 40],
+                "attribution": "Test <test@example.com>, generated fix",
+                "reason": "the generated accepted fix",
                 "files": [
                     {
                         "path": "kernel.py",
@@ -119,7 +161,23 @@ def synthetic_source(root: Path) -> dict:
                         "accepted_sha256": digest("# stock kernel\nreturn 2\n"),
                     }
                 ],
-            }
+            },
+            {
+                "patch": str(root / "generated-guard.patch"),
+                "root": "..",
+                "attribution": "Penny <Pennyroyal@agentmail.to>, generated guard",
+                "author": "Penny <Pennyroyal@agentmail.to>",
+                "commits": ["d" * 40],
+                "reason": "the generated include guard",
+                "scope": "generated build-only guard",
+                "files": [
+                    {
+                        "path": "guard.cu",
+                        "stock_sha256": digest(GUARD_STOCK),
+                        "accepted_sha256": digest(GUARD_ACCEPTED),
+                    }
+                ],
+            },
         ],
     }
 
@@ -174,6 +232,14 @@ def test_carried_mailboxes_are_the_accepted_source():
             # Upstream FlashInfer #6227, cherry picked from the accepted commit.
             "lineage": ["c0771c79b7e2f2bc0edf4fdcb7c43b986a56707a", "#6227"],
         },
+        COMPAT: {
+            "commits": [COMPAT_COMMIT],
+            "paths": [COMPAT_PATH],
+            "author": "Penny <Pennyroyal@agentmail.to>",
+            "root": "..",
+            # Declared in the manifest for what it is: a local build guard.
+            "lineage": ["not an upstream FlashInfer change"],
+        },
     }
     by_name = {entry["patch"]: entry for entry in source["patches"]}
     assert set(by_name) == set(expected)
@@ -201,6 +267,34 @@ def test_carried_mailboxes_are_the_accepted_source():
     # Scope guards: the accepted input is the six production files, nothing else.
     assert len(by_name["patches/moe-source.patch"]["files"]) == 2
     assert len(by_name["patches/gdn-source.patch"]["files"]) == 4
+    compat = by_name[COMPAT]
+    guard = compat["files"][0]
+    assert guard["stock_sha256"] == COMPAT_STOCK_SHA256, guard
+    assert guard["accepted_sha256"] == COMPAT_ACCEPTED_SHA256, guard
+    # The two accepted fixes stay the fingerprinted pair; the guard travels with
+    # them, last, and is not itself one of the Xid109 fixes.
+    assert source["patches"].index(compat) == len(source["patches"]) - 1, source
+    mailbox = (PACKAGE_DIR / COMPAT).read_text()
+    # The preimage is the stock unconditional include that real build choked on,
+    # and the fix is a pure addition around it: the guard restates the file's own
+    # ASAN condition, so nothing in the file moves and nothing is stubbed out.
+    assert " #include <sanitizer/asan_interface.h>\n+#endif" in mailbox, mailbox
+    assert "+#if defined(__SANITIZE_ADDRESS__) || \\" in mailbox, mailbox
+    assert (
+        "+    (defined(__has_feature) && __has_feature(address_sanitizer))" in mailbox
+    )
+    assert not re.search(r"^-[^-]", mailbox, flags=re.M), mailbox
+    assert "FLASHINFER_" not in mailbox, "the guard adds no new knob"
+    # Build-only: one file, and the changed lines touch nothing but the guard.
+    assert mailbox.count("diff --git") == 1, mailbox
+    changed = "".join(
+        line + "\n"
+        for line in mailbox.splitlines()
+        if line[:1] in "+-" and not line.startswith(("---", "+++", "-- "))
+    )
+    for token in ("cudaMemcpy", "__nv_bfloat16", "-fsanitize", "CUDAGen", "cudaStream"):
+        assert token not in changed, token
+    assert "sanitizer headers" in compat["scope"], compat["scope"]
     assert (
         "FLASHINFER_MOE_FUSED_PROLOGUE"
         in (PACKAGE_DIR / "patches/moe-source.patch").read_text()
@@ -232,16 +326,23 @@ def test_stock_source_is_patched_once_and_a_repeat_run_accepts_it(tmp_path):
         tmp_path / "site", {"kernel.py": "# stock kernel\nreturn 1\n"}, "9.9.9"
     )
     patch = Path(source["patches"][0]["patch"])
+    guard = Path(source["patches"][1]["patch"])
     # A Pennyroyal checkout around the environment must not redirect git apply.
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
-    assert module.apply_accepted_source(package, source) == [f"{patch}: applied"]
-    assert (package / "kernel.py").read_text() == "# stock kernel\nreturn 2\n"
-    # The same command again is a no-op, not an error and not a double patch.
     assert module.apply_accepted_source(package, source) == [
-        f"{patch}: already patched"
+        f"{patch}: applied",
+        f"{guard}: applied",
     ]
     assert (package / "kernel.py").read_text() == "# stock kernel\nreturn 2\n"
+    assert (package.parent / "guard.cu").read_text() == GUARD_ACCEPTED
+    # The same command again is a no-op, not an error and not a double patch.
+    assert module.apply_accepted_source(package, source) == [
+        f"{patch}: already patched",
+        f"{guard}: already patched",
+    ]
+    assert (package / "kernel.py").read_text() == "# stock kernel\nreturn 2\n"
+    assert (package.parent / "guard.cu").read_text() == GUARD_ACCEPTED
 
 
 def test_unexpected_source_and_wrong_pin_fail_before_building(tmp_path):
@@ -253,6 +354,20 @@ def test_unexpected_source_and_wrong_pin_fail_before_building(tmp_path):
     raises(
         lambda: module.apply_accepted_source(package, source),
         "neither the stock nor the accepted",
+    )
+
+    # The compatibility guard is its own set, one level above the package: a
+    # third-party edit of that single file is refused the same way, before
+    # anything is compiled.
+    edited = installed_tree(
+        tmp_path / "site-guard",
+        {"kernel.py": "# stock kernel\nreturn 2\n"},
+        "9.9.9",
+        guard="#pragma once\n",
+    )
+    raises(
+        lambda: module.apply_accepted_source(edited, source),
+        f"guard.cu holds {digest('#pragma once' + chr(10))}",
     )
 
     # A partly applied state is a different answer from a repeat installation.
@@ -305,7 +420,15 @@ def test_installed_check_needs_the_accepted_source_and_the_package_local_module(
         lambda: module.check_installed(package, source, [stock_kernel]),
         "is stock FlashInfer source",
     )
+    # Patched fixes with the guard missing is its own answer, and it names the
+    # file the compile would have died on.
     module.apply_accepted_source(package, source)
+    (package.parent / "guard.cu").write_text(GUARD_STOCK)
+    raises(
+        lambda: module.check_installed(package, source, [stock_kernel]),
+        "the generated include guard",
+    )
+    (package.parent / "guard.cu").write_text(GUARD_ACCEPTED)
     # Patched source, but the preferred path only holds a copy of the prebuilt
     # provider kernel: nothing was built from the accepted source.
     raises(
@@ -332,7 +455,12 @@ def test_installed_check_needs_the_accepted_source_and_the_package_local_module(
             "patch": str(tmp_path / "generated-source.patch"),
             "author": "Test <test@example.com>",
             "commits": ["0" * 40],
-        }
+        },
+        {
+            "patch": str(tmp_path / "generated-guard.patch"),
+            "author": "Penny <Pennyroyal@agentmail.to>",
+            "commits": ["d" * 40],
+        },
     ]
 
     # Copying the stock prebuilt kernel into the preferred path is not a build,
@@ -411,7 +539,10 @@ def test_a_stale_jit_cache_shim_stops_the_upgrade_before_the_build(tmp_path):
     module = installer()
     source = synthetic_source(tmp_path)
     package = installed_tree(
-        tmp_path / "site", {"kernel.py": "# stock kernel\nreturn 2\n"}, "9.9.9"
+        tmp_path / "site",
+        {"kernel.py": "# stock kernel\nreturn 2\n"},
+        "9.9.9",
+        guard=GUARD_ACCEPTED,
     )
     (package / source["aot_path"]).parent.mkdir(parents=True)
     (package / source["aot_path"]).write_bytes(b"built")
@@ -442,22 +573,23 @@ def test_a_stale_jit_cache_shim_stops_the_upgrade_before_the_build(tmp_path):
     module.check_installed(package, source)
 
 
-def test_the_documented_recovery_aligns_the_whole_flashinfer_family():
+def test_the_documented_update_aligns_the_family_before_the_step():
     guide = BUILD_GUIDE.read_text()
-    # The one fenced command block that touches the JIT-cache family: the prose
-    # may move, the block is what an operator pastes.
+    # The one fenced command block that touches the JIT-cache family is the
+    # primary update sequence itself: an operator pastes one block, in order.
     blocks = [part for part in guide.split("```") if "flashinfer-jit-cache==" in part]
     assert len(blocks) == 1, blocks
-    recovery = blocks[0]
+    update = blocks[0]
     source = source_manifest()
-    for spec in (
-        f"'flashinfer-python[cu13]=={source['flashinfer_python']}'",
-        f"'flashinfer-jit-cache=={source['flashinfer_jit_cache']}'",
-        f"'flashinfer-jit-cache-sm120f=={source['flashinfer_jit_cache']}'",
-    ):
-        assert spec in recovery, spec
-    assert "--no-deps --index-url https://flashinfer.ai/whl/cu130" in recovery
-    assert "scripts/pennyroyal/flashinfer/install.py" in recovery
+    step = update.index("scripts/pennyroyal/flashinfer/install.py")
+    pin = update.index(f"'flashinfer-python[cu13]=={source['flashinfer_python']}'")
+    cache = update.index(f"'flashinfer-jit-cache=={source['flashinfer_jit_cache']}'")
+    assert f"'flashinfer-jit-cache-sm120f=={source['flashinfer_jit_cache']}'" in update
+    # The family is aligned before the step runs, so a v2.5.x upgrade works on
+    # its first pass instead of dying on the stale shim inside the compile.
+    assert update.index("--no-deps -e python") < pin < cache < step, update
+    assert "--no-deps --index-url https://flashinfer.ai/whl/cu130" in update
+    assert "#flashinfer-python" not in update
     # Both source selections name a release ref rather than an older tag, so the
     # step cannot be documented against a checkout that lacks it.
     for sequence in (

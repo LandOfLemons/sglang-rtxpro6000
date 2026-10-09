@@ -65,7 +65,9 @@ RUN uv pip install --python .venv/bin/python --no-deps \
 # kernels; FlashInfer prefers the package-local module below. Building here is
 # what lets a downloaded image run the Next profiles with no rebuild, no
 # configurator and no first-launch compilation; the JIT objects stay in the
-# build stage.
+# build stage. The step also guards one stock include of <sanitizer/...> that the
+# gcc15 package above does not ship, which is why the compile needs no sanitizer
+# development headers here either.
 RUN FLASHINFER_WORKSPACE_BASE=/tmp/penny-fi-sm120 \
     .venv/bin/python scripts/pennyroyal/flashinfer/install.py \
     && .venv/bin/python scripts/pennyroyal/flashinfer/install.py --check >/dev/null \

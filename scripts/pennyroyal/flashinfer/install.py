@@ -4,10 +4,10 @@
 Both Pennyroyal installation paths run this single step after their FlashInfer
 dependencies: the fresh and update sequences in BUILD.md and the container
 build in docker/pennyroyal/Dockerfile.  It patches the installed
-flashinfer-python sources with the accepted MoE and GDN mailboxes under
-patches/, builds the SM120 fused-MoE module from those patched headers, and
-installs it at the package-local AOT path that FlashInfer's loader checks
-before any provider wheel:
+flashinfer-python sources in place under patches/ -- the accepted MoE and GDN
+mailboxes plus one build-only compatibility guard -- builds the SM120 fused-MoE
+module from those patched headers, and installs it at the package-local AOT path
+that FlashInfer's loader checks before any provider wheel:
 
     <site-packages>/flashinfer/data/aot/fused_moe_120/fused_moe_120.so
 
@@ -32,6 +32,14 @@ compiler and job-count controls (CUDAHOSTCXX, MAX_JOBS, FLASHINFER_NVCC_THREADS)
 FLASHINFER_CUDA_ARCH_LIST is set to the accepted SM120 family target for this
 build because FlashInfer ignores TORCH_CUDA_ARCH_LIST here.  Set
 FLASHINFER_WORKSPACE_BASE to keep the ninja objects between runs.
+
+The SM120 compile also needs the compatibility guard: stock nv_internal
+memoryUtils.cu asks for <sanitizer/asan_interface.h> even though it uses the ASAN
+macros only under its own ASAN detection, so a toolchain whose compiler package
+omits the sanitizer headers cannot build the module at all.  It is carried
+separately, so the two accepted mailboxes stay exactly as reviewed, and it comes
+out when the pin ships the guard or the build environment is defined to always
+carry the headers.
 
 An environment that predates this pin keeps a stale flashinfer-jit-cache shim
 beside the new FlashInfer, and FlashInfer rejects that combination while
@@ -140,13 +148,14 @@ def require_aligned_jit_cache(source: dict, package: Path) -> None:
             f"flashinfer-python {pin} refuses at import time; install "
             f"'flashinfer-jit-cache=={source['flashinfer_jit_cache']}' and "
             f"'flashinfer-jit-cache-sm120f=={source['flashinfer_jit_cache']}' "
-            "with --no-deps from https://flashinfer.ai/whl/cu130 as in BUILD.md, "
+            "with --no-deps from https://flashinfer.ai/whl/cu130 as in the update "
+            "block of BUILD.md, "
             "or uninstall it to compile the other kernels on first use"
         )
 
 
 def _classify(root: Path, entry: dict) -> tuple[str, str]:
-    """Tell the stock source, the accepted source and anything else apart."""
+    """Tell the stock source, the carried source and anything else apart."""
     verdicts = set()
     for spec in entry["files"]:
         path = root / spec["path"]
@@ -174,10 +183,10 @@ def _classify(root: Path, entry: dict) -> tuple[str, str]:
 def _git_apply(entry: dict, root: Path) -> None:
     """Apply one mailbox to root, which is normally outside any Git checkout.
 
-    root is the install path adaptation the accepted commits call for: the MoE
-    mailbox names the source-repo csrc/ tree, which the wheel ships under
-    flashinfer/data, while the GDN mailbox names the importable flashinfer/
-    package, which sits one level up. GIT_WORK_TREE stops git apply from
+    Each entry names the root its paths are relative to.  The MoE mailbox names
+    the source-repo csrc/ tree, which the wheel ships under flashinfer/data; the
+    GDN mailbox and the compatibility guard name the importable flashinfer/
+    package, one level up.  GIT_WORK_TREE stops git apply from
     adopting the surrounding Pennyroyal checkout and quietly skipping every
     file that is not inside it.
     """
@@ -266,7 +275,8 @@ def check_installed(
     """Verify the accepted source and the package-local SM120 module are there.
 
     A stock FlashInfer install, or a stock provider wheel alone, fails here:
-    the accepted source and the package-local module are both required.  Pass
+    every carried source set and the package-local module are required, so an
+    install missing only the compatibility guard is named too.  Pass
     the provider wheels' own copies of the module in stock_modules so an install
     that merely copied the prebuilt kernel into place also fails.
     """
@@ -277,7 +287,9 @@ def check_installed(
         verdict, detail = _classify(root, entry)
         if verdict != "accepted":
             raise fail(
-                f"{detail or f'{root} is stock FlashInfer source'}; run {__file__}"
+                f"{detail or f'{root} is stock FlashInfer source'}; "
+                f"{entry['patch']} ({entry['reason']}) is not installed, run "
+                f"{__file__}"
             )
     module = package / source["aot_path"]
     if not module.is_file() or module.stat().st_size == 0:

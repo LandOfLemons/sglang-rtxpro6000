@@ -62,10 +62,16 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
   for the pin, the build path and the profile default, and
   [PROVENANCE.md](PROVENANCE.md#flashinfer-sm120-accepted-source) for the
   attribution. Upgrading from a 0.6.17 environment needs the matching
-  `flashinfer-jit-cache` family, which BUILD.md now installs in the same step;
-  the packaging command names the stale wheel instead of failing inside the
-  compile. FlashInfer's own GDN default stays off; only the Next recipes and
-  Next startup files opt in, a saved or inherited
+  `flashinfer-jit-cache` family, which BUILD.md now installs in the primary
+  update block before the packaging step, so an ordinary upgrade works on its
+  first pass instead of failing and being repaired; the step still names a stale
+  wheel rather than dying inside the compile. The SM120 compile also carries one
+  build-only guard, `patches/asan-include-compat.patch`, because stock
+  `memoryUtils.cu` asked for `<sanitizer/asan_interface.h>` unconditionally and the
+  image's `gcc15` package does not install that header: a non-ASAN build now needs
+  nothing new, an ASAN build still requires the real header, and the two accepted
+  mailboxes stay byte-for-byte as reviewed. FlashInfer's own GDN default stays off;
+  only the Next recipes and Next startup files opt in, a saved or inherited
   `FLASHINFER_GDN_FP16_ACCUM_MMA=0` reaches the container through the existing
   settings propagation, and `FLASHINFER_MOE_FUSED_PROLOGUE=0` remains the MoE
   kill switch. The resolved mode is now one more field of the existing NIXL
