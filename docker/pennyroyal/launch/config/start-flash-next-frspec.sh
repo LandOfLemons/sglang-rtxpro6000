@@ -51,6 +51,12 @@ case "$SGLANG_MM_PREPROCESS_DEVICE" in
   cuda:*) IMAGE_PROCESSOR_BACKEND=torchvision ;;
   *) echo "Choose SGLANG_MM_PREPROCESS_DEVICE=cpu or cuda:N" >&2; exit 1 ;;
 esac
+# Accepted FlashInfer GDN fix: the image's patched SM12x delta-rule prefill
+# kernels run in FP16-accumulate MMA mode, the qualified default of the
+# Flash-Next profiles. Exported before Python imports FlashInfer. Set it to 0
+# here, or pass -e FLASHINFER_GDN_FP16_ACCUM_MMA=0, to opt out; FlashInfer's own
+# default stays off and the 27B startup file never sets it.
+export FLASHINFER_GDN_FP16_ACCUM_MMA="${FLASHINFER_GDN_FP16_ACCUM_MMA:-1}"
 
 CONFIG_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-/opt/pennyroyal}"

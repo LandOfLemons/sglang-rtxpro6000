@@ -50,6 +50,7 @@ CONTROLLED = (
     "MAX_TOTAL_TOKENS",
     "SGLANG_MM_PREPROCESS_DEVICE",
     "SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR",
+    "FLASHINFER_GDN_FP16_ACCUM_MMA",
     "CUDA_VISIBLE_DEVICES",
     "FAKE_CUDA_DEVICES",
 )
@@ -188,6 +189,41 @@ def test_launcher_mounts_directories_and_runs_the_mounted_script(tmp_path):
     assert argv[argv.index("pennyroyal:test") + 1] == "exec"
     # A config outside the script's directory arrives as a container path.
     assert values_after(argv, "-e") == ["NIXL_CONFIG=/nixl-config/nixl conf.toml"]
+
+
+def test_next_profiles_default_the_accepted_gdn_mode(tmp_path):
+    # The accepted FlashInfer GDN fix is opted in per Next profile, in the
+    # launched process's own environment: the image recipe and the operator's
+    # mounted startup file both default it, an explicit opt-out survives, and
+    # the 27B profile never sees the variable at all.
+    mounted = prepared_config(tmp_path, "start-flash-next.sh") / "start-flash-next.sh"
+    plain = prepared_config(tmp_path, "start-27b-dflash2.sh") / "start-27b-dflash2.sh"
+    for startup, via_entrypoint in (
+        (mounted, True),
+        (RECIPES / "serve-flash-next.sh", False),
+    ):
+        result, _, server_env, _ = launch(
+            tmp_path, startup, through_entrypoint=via_entrypoint
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert server_env["gdn_fp16_accum_mma"] == "1", startup
+        result, _, opted_out, _ = launch(
+            tmp_path,
+            startup,
+            through_entrypoint=via_entrypoint,
+            env={"FLASHINFER_GDN_FP16_ACCUM_MMA": "0"},
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert opted_out["gdn_fp16_accum_mma"] == "0", startup
+    for startup, via_entrypoint in (
+        (plain, True),
+        (RECIPES / "serve-qwen38-27b-dflash2.sh", False),
+    ):
+        result, _, server_env, _ = launch(
+            tmp_path, startup, through_entrypoint=via_entrypoint
+        )
+        assert result.returncode == 0, (startup, result.stderr)
+        assert server_env["gdn_fp16_accum_mma"] == "unset", startup
 
 
 def test_launcher_default_startup_keeps_the_script_own_nixl_config(tmp_path):
@@ -402,6 +438,7 @@ def image_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         'printf "max_running_requests=%s\\n" "${MAX_RUNNING_REQUESTS:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
         'printf "ple_backend=%s\\n" "${PENNY_PLE_BACKEND:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
         'printf "nccl_p2p_disable=%s\\n" "${NCCL_P2P_DISABLE:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
+        'printf "gdn_fp16_accum_mma=%s\\n" "${FLASHINFER_GDN_FP16_ACCUM_MMA:-unset}" >> "$SGLANG_ENV_CAPTURE"\n'
     )
     sglang.chmod(0o755)
     (root / "configs").symlink_to(REPO / "configs")
