@@ -150,6 +150,11 @@ class MambaComponent(TreeComponent):
                     self._lowest_common_ancestor(old, leaf),
                     "fork",
                 )
+            # A fork drops the deeper abandoned pin, and cache_finished_req notes
+            # the insert before registering the leaf, so the forward-depth guard
+            # had not let this shallower durable checkpoint take the pin yet.
+            if leaf.component_data[self.component_type].host_value is not None:
+                self._pin_resume(session_id, leaf, "commit")
         super().register_session_leaf(session_id, leaf)
 
     def release_session(self, session_id: str) -> int:

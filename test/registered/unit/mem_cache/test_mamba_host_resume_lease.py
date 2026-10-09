@@ -52,6 +52,12 @@ class _Bridge:
     def reset_session_state(self):
         return None
 
+    def resolve_session_leaf(self, req, last_node):
+        return self.comp.resolve_session_leaf(req, last_node)
+
+    def register_session_leaf(self, session_id, leaf):
+        return self.comp.register_session_leaf(session_id, leaf)
+
     def release_session(self, session_id):
         return self.comp.release_session(session_id)
 
@@ -101,6 +107,11 @@ class ResumeLeaseTests(unittest.TestCase):
             session_refs=None,
             _free_values=lambda *_args, **_kwargs: None,
             host_pool_group=SimpleNamespace(get_pool=lambda _name: pool),
+            enable_mamba_extra_buffer=False,
+            req_to_token_pool=SimpleNamespace(
+                mamba_ckpt_pool=None,
+                free_mamba_cache=lambda *_a, **_k: None,
+            ),
         )
         self.root = _Node(0, None, host=False)
         self.nodes = {0: self.root}
@@ -141,7 +152,18 @@ class ResumeLeaseTests(unittest.TestCase):
         )
 
     def _insert(self, node):
-        return SimpleNamespace(last_device_node=node.id)
+        return SimpleNamespace(last_device_node=node.id, mamba_exist=False)
+
+    def _finish(self, req, node):
+        """cache_finished_req order: component cleanup, then session register."""
+        req.last_node = node.id
+        self.comp.cleanup_after_caching_req(
+            req,
+            is_finished=True,
+            insert_result=self._insert(node),
+            insert_params=None,
+        )
+        self.tracker.register_session_ref(req)
 
     def _open(self, session_id="s"):
         return self.tracker.open_radix_session(session_id)
@@ -259,7 +281,6 @@ class ResumeLeaseTests(unittest.TestCase):
         self.assertEqual(node.component_data[MAMBA].host_lock_ref, 0)
         self.assertNotIn(node.id, self.comp._pending_resume_backup)
 
-
     def test_fork_cancels_a_pending_backup_on_a_device_only_abandoned_leaf(self):
         generation = self._open()
         req = self._req("s", generation)
@@ -280,6 +301,9 @@ class ResumeLeaseTests(unittest.TestCase):
         shared.children = {2: abandoned, 3: branch}
         self.comp.register_session_leaf("s", branch)
         self.assertNotIn(abandoned.id, self.comp._pending_resume_backup)
+        # Registering the new leaf hands the pin to the branch this session
+        # actually resumes from, even though it is shallower.
+        self.assertEqual(self.comp._resume_pins, {"s": {"commit": branch.id}})
 
         # The abandoned backup lands after the fork. Same open generation, so
         # only the cancelled ownership can keep it from stealing the pin.
@@ -292,11 +316,10 @@ class ResumeLeaseTests(unittest.TestCase):
             ],
             cache_actions=[],
         )
-        self.assertNotIn("s", self.comp._resume_pins)
+        self.assertEqual(self.comp._resume_pins, {"s": {"commit": branch.id}})
         self.assertEqual(abandoned.component_data[MAMBA].host_lock_ref, 0)
 
-        # The live branch is shallower, so it can only pin once the abandoned
-        # checkpoint stopped holding the pin.
+        # Repeating the note for the pinned checkpoint changes nothing.
         self.comp._note_inserted_resume(req, self._insert(branch))
         self.assertEqual(self.comp._resume_pins, {"s": {"commit": branch.id}})
         self.assertEqual(branch.component_data[MAMBA].host_lock_ref, 1)
@@ -358,6 +381,96 @@ class ResumeLeaseTests(unittest.TestCase):
         self.assertEqual(self.comp._pending_resume_backup[abandoned.id], {"a": first})
         self.assertEqual(abandoned.component_data[MAMBA].host_value, None)
         self.assertEqual(self.freed, [])
+
+    def test_finished_turn_pins_the_shorter_new_branch_after_the_fork(self):
+        """The deeper abandoned pin must not leave the new branch unprotected.
+
+        cache_finished_req notes the insert before registering the session leaf,
+        so the forward-depth guard rejects the shallower branch while the old
+        deeper pin still stands, and the fork then drops that pin.
+        """
+        generation = self._open()
+        req = self._req("s", generation)
+        shared = self._add(_node(1, self.root, tokens=[5]))
+        old = self._add(_node(2, shared, tokens=[10, 11, 12]))
+        shared.children = {2: old}
+        deeper = self._add(_node(4, old, host=False, tokens=[13, 14, 15]))
+        deeper.component_data[MAMBA].value = [1]
+        old.children = {4: deeper}
+
+        # Turn 1 leaves a durable host checkpoint, turn 2 goes deeper device-only.
+        self._finish(req, old)
+        self._finish(req, deeper)
+        self.assertEqual(self.comp._resume_pins["s"], {"commit": old.id})
+        self.assertEqual(self.comp._pending_resume_backup[deeper.id], {"s": generation})
+
+        # Another session shares the deeper pending checkpoint.
+        other = self._open("b")
+        self.comp._note_inserted_resume(self._req("b", other), self._insert(deeper))
+        self.assertEqual(
+            self.comp._pending_resume_backup[deeper.id], {"s": generation, "b": other}
+        )
+
+        # A match on the shared prefix is the only other lease this session holds.
+        params = MatchPrefixParams(key=RadixKey(token_ids=[]), req=req)
+        self.comp.finalize_match_result_in_tree_core(
+            MatchResult(
+                device_indices=[],
+                last_device_node=shared,
+                last_host_node=shared,
+                best_match_node=shared,
+            ),
+            params,
+            [],
+            0,
+        )
+
+        # Turn 3 forks to a shallower branch that is already durable on host.
+        branch = self._add(_node(3, shared, tokens=[20]))
+        shared.children = {2: old, 3: branch}
+        req.last_node = branch.id
+        self.comp.cleanup_after_caching_req(
+            req,
+            is_finished=True,
+            insert_result=self._insert(branch),
+            insert_params=None,
+        )
+        # The deeper abandoned pin still stands at this point, so the new
+        # branch holds nothing yet (monotonic depth guard).
+        self.assertEqual(
+            self.comp._resume_pins["s"], {"match": shared.id, "commit": old.id}
+        )
+        self.assertEqual(branch.component_data[MAMBA].host_lock_ref, 0)
+
+        self.tracker.register_session_ref(req)
+
+        self.assertEqual(
+            self.comp._resume_pins["s"], {"match": shared.id, "commit": branch.id}
+        )
+        self.assertEqual(branch.component_data[MAMBA].host_lock_ref, 1)
+        self.assertEqual(old.component_data[MAMBA].host_lock_ref, 0)
+        self.assertIsNone(old.component_data[MAMBA].host_value)
+        self.assertEqual(self.freed, [old.id])
+        self.assertEqual(self.comp._session_leaves["s"], {branch})
+
+        # The abandoned deeper backup lands late: s keeps the new branch, and
+        # the other owner still gets its promised checkpoint.
+        self.comp.commit_hicache_transfer(
+            deeper,
+            CacheTransferPhase.BACKUP_HOST,
+            transfers=[
+                SimpleNamespace(host_indices=SimpleNamespace(clone=lambda: [1]))
+            ],
+            cache_actions=[],
+        )
+        self.assertEqual(
+            self.comp._resume_pins["s"], {"match": shared.id, "commit": branch.id}
+        )
+        self.assertEqual(self.comp._resume_pins["b"], {"commit": deeper.id})
+        self.assertEqual(deeper.component_data[MAMBA].host_lock_ref, 1)
+        self.assertEqual(
+            set(self.comp._resume_leases["s"]), {shared.id, branch.id}
+        )
 
 
 if __name__ == "__main__":
