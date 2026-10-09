@@ -146,7 +146,7 @@ class Prompt:
 # Prompt order for the wizard: basic section first, advanced on request.
 # The keys a normal first run should not have to think about (the sglang and
 # python programs, the image, the runtime identity, the NIXL prefix, the
-# capacity/FP8/PLE knobs) are all advanced=True in penny_config.py, so they
+# capacity and PLE knobs) are all advanced=True in penny_config.py, so they
 # only appear when the operator says yes to the advanced section.
 _BASIC_ORDER = (
     "REPO_ROOT",

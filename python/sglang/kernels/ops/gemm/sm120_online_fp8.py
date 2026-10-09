@@ -163,6 +163,40 @@ def flash_next_metadata(config: object) -> bool:
     return bool(names & frozenset(_FLASH_NEXT_METADATA))
 
 
+def _metadata_flag_true(node: object, key: str, depth: int = 0) -> bool:
+    if node is None or depth > 1 or isinstance(node, (str, int, float, bool)):
+        return False
+    if isinstance(node, dict):
+        flagged = node.get(key)
+        text_config = node.get("text_config")
+    else:
+        flagged = getattr(node, key, None)
+        text_config = getattr(node, "text_config", None)
+    return bool(flagged is True) or _metadata_flag_true(text_config, key, depth + 1)
+
+
+def flash_next_eligible(model_config: object) -> bool:
+    """Whether the ACTUAL loaded configuration can run the accepted
+    rowwise-FP8 representation, reusing the accepted contracts verbatim -- no
+    new support invented here:
+
+    * Flash-Next (qwen4_exp) checkpoint metadata, the only family whose
+      modules consume the conversion;
+    * a BF16 compute dtype: ``replace_linear_weight_rowwise_fp8`` and the
+      accepted dense conversion quantize the resident BF16 checkpoint weight
+      and refuse any other dtype (float16 included), so automatic selection
+      stays off rather than booting into that rejection;
+    * untied input/lm_head weights: the accepted Qwen4Exp post-load contract
+      rejects ``tie_word_embeddings=True`` under online FP8.
+    """
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None or not flash_next_metadata(hf_config):
+        return False
+    if getattr(model_config, "dtype", None) is not torch.bfloat16:
+        return False
+    return not _metadata_flag_true(hf_config, "tie_word_embeddings")
+
+
 def _read_checkpoint_metadata(model_path: str) -> dict | None:
     try:
         with open(os.path.join(model_path, "config.json"), encoding="utf-8") as handle:
@@ -200,17 +234,28 @@ def resolve_precision(
     return _OFF_PRECISION
 
 
-def launch_precision(model_path: str) -> str:
+def launch_precision(
+    model_path: str, *, compute_dtype: torch.dtype = torch.bfloat16
+) -> str:
     """Effective precision for one launch, from the same eligibility logic
     ``configure_online_fp8`` applies -- shared by the runtime default and the
     recipe/container identity probes, so public direct launches and recipe
-    launches cannot disagree about which cache a run may read."""
+    launches cannot disagree about which cache a run may read.  The recipe
+    callers pin ``--dtype bfloat16`` in their own launch line, so the dtype
+    half of the accepted representation contract is the keyword default; the
+    tied-head half is read from the checkpoint's own config.json metadata."""
+    metadata = _read_checkpoint_metadata(model_path)
+    model_eligible = (
+        flash_next_metadata(metadata)
+        and compute_dtype is torch.bfloat16
+        and not _metadata_flag_true(metadata, "tie_word_embeddings")
+    )
     available = torch.cuda.is_available()
     return resolve_precision(
         envs.SGLANG_SM120_ONLINE_MXFP8.get(),
         cuda_available=available,
         capability=torch.cuda.get_device_capability() if available else None,
-        model_eligible=flash_next_metadata(_read_checkpoint_metadata(model_path)),
+        model_eligible=model_eligible,
     )
 
 
