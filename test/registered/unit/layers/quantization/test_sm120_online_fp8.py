@@ -578,6 +578,27 @@ def test_launch_precision_identity_follows_effective_precision(monkeypatch):
             sm120_online_fp8.launch_precision(os.path.join(tmp, "dense"))
             == "rowwise_fp8"
         )
+        # The recipe/container probe checks the same representation contract
+        # the runtime applies: a tied-head checkpoint and a non-BF16 compute
+        # dtype resolve to automatic-off before any namespace is derived, so
+        # recipe precision stays consistent with the runtime decision.
+        monkeypatch.delenv("SGLANG_SM120_ONLINE_MXFP8")
+        os.mkdir(os.path.join(tmp, "tied"))
+        with open(os.path.join(tmp, "tied", "config.json"), "w") as handle:
+            json.dump(
+                {
+                    "architectures": ["Qwen4ExpForConditionalGeneration"],
+                    "tie_word_embeddings": True,
+                },
+                handle,
+            )
+        assert sm120_online_fp8.launch_precision(os.path.join(tmp, "tied")) == "false"
+        assert (
+            sm120_online_fp8.launch_precision(
+                os.path.join(tmp, "next"), compute_dtype=torch.float16
+            )
+            == "false"
+        )
 
 
 def test_scheduler_initialization_resolves_the_default_without_a_flag(monkeypatch):
@@ -611,4 +632,114 @@ def test_scheduler_initialization_resolves_the_default_without_a_flag(monkeypatc
     # A saved explicit false propagates unchanged: silent, original paths.
     monkeypatch.setenv("SGLANG_SM120_ONLINE_MXFP8", "false")
     initialize_bf16_gemm_config(server_args, model_config=next_config)
+    assert online_fp8_enabled() is False
+
+
+def _sm120_server_args():
+    return SimpleNamespace(
+        bf16_gemm_backend="torch", enable_deterministic_inference=False
+    )
+
+
+def test_automatic_selection_respects_the_loaded_representation(monkeypatch):
+    # Review1 regression at the real initializer boundary with a mocked SM120:
+    # an FP16 or tied-head Flash-Next config must stay automatic-OFF (the
+    # accepted conversion rejects FP16 residents and the accepted Qwen4Exp
+    # post-load rejects tied heads), while an explicit request still reaches
+    # those accepted, useful failures instead of a silent downgrade.
+    from sglang.srt.layers.quantization.unquant import initialize_bf16_gemm_config
+
+    monkeypatch.delenv("SGLANG_SM120_ONLINE_MXFP8", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda device=None: (12, 0)
+    )
+    server_args = _sm120_server_args()
+    next_hf = {"architectures": ["Qwen4ExpForConditionalGeneration"]}
+    bf16 = SimpleNamespace(hf_config=next_hf, dtype=torch.bfloat16)
+    fp16 = SimpleNamespace(hf_config=next_hf, dtype=torch.float16)
+    tied = SimpleNamespace(
+        hf_config={**next_hf, "tie_word_embeddings": True}, dtype=torch.bfloat16
+    )
+    nested_tied = SimpleNamespace(
+        hf_config={
+            **next_hf,
+            "text_config": {"tie_word_embeddings": True},
+        },
+        dtype=torch.bfloat16,
+    )
+
+    initialize_bf16_gemm_config(server_args, model_config=bf16, device="cuda", gpu_id=0)
+    assert online_fp8_enabled() is True and sm120_online_fp8.fast_paths_enabled()
+
+    for unsupported in (fp16, tied, nested_tied):
+        initialize_bf16_gemm_config(
+            server_args, model_config=unsupported, device="cuda", gpu_id=0
+        )
+        assert online_fp8_enabled() is False
+        assert sm120_online_fp8.fast_paths_enabled() is False
+
+    # Explicit on FP16: the switch turns on (legacy contract) and the accepted
+    # BF16-only conversion itself fails loudly with a useful message.
+    monkeypatch.setenv("SGLANG_SM120_ONLINE_MXFP8", "true")
+    initialize_bf16_gemm_config(server_args, model_config=fp16, device="cuda", gpu_id=0)
+    assert online_fp8_enabled() is True
+    linear = nn.Linear(4, 4, bias=False, dtype=torch.float16)
+    with pytest.raises(RuntimeError, match="BF16 resident weight"):
+        replace_linear_weight_rowwise_fp8(linear)
+
+    # Explicit false on the same unsupported configs: silent original paths.
+    monkeypatch.setenv("SGLANG_SM120_ONLINE_MXFP8", "false")
+    for unsupported in (fp16, tied):
+        initialize_bf16_gemm_config(
+            server_args, model_config=unsupported, device="cuda", gpu_id=0
+        )
+        assert online_fp8_enabled() is False
+
+
+def test_device_resolution_probes_the_assigned_rank_device(monkeypatch):
+    # Review1 regression: init runs before the ModelRunner selects the device,
+    # and a heterogeneous host must not be decided by a GPU0 probe. GPU0 is
+    # SM90 here, the scheduler-assigned GPU1 is SM120.
+    from sglang.srt.layers.quantization.unquant import initialize_bf16_gemm_config
+
+    monkeypatch.delenv("SGLANG_SM120_ONLINE_MXFP8", raising=False)
+    caps = {0: (9, 0), 1: (12, 0)}
+    probed = []
+
+    def fake_capability(device=None):
+        probed.append(device)
+        return caps[device if device is not None else 0]
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", fake_capability)
+    server_args = _sm120_server_args()
+    bf16 = SimpleNamespace(
+        hf_config={"architectures": ["Qwen4ExpForConditionalGeneration"]},
+        dtype=torch.bfloat16,
+    )
+
+    initialize_bf16_gemm_config(server_args, model_config=bf16, device="cuda", gpu_id=1)
+    assert (
+        online_fp8_enabled() is True
+    ), "assigned SM120 rank must not be decided by GPU0"
+    assert probed and all(index == 1 for index in probed)
+
+    probed.clear()
+    initialize_bf16_gemm_config(server_args, model_config=bf16, device="cuda", gpu_id=0)
+    assert online_fp8_enabled() is False, "inverse: no enabling on the wrong hardware"
+
+    # Explicit request on the SM90 rank: fail loud, unchanged contract.
+    monkeypatch.setenv("SGLANG_SM120_ONLINE_MXFP8", "true")
+    with pytest.raises(RuntimeError, match="exactly SM120"):
+        initialize_bf16_gemm_config(
+            server_args, model_config=bf16, device="cuda", gpu_id=0
+        )
+    # Non-CUDA runtime device kind: explicit fail-loud, automatic silent-off.
+    with pytest.raises(RuntimeError, match="requires CUDA"):
+        initialize_bf16_gemm_config(
+            server_args, model_config=bf16, device="cpu", gpu_id=1
+        )
+    monkeypatch.setenv("SGLANG_SM120_ONLINE_MXFP8", "")
+    initialize_bf16_gemm_config(server_args, model_config=bf16, device="cpu", gpu_id=1)
     assert online_fp8_enabled() is False

@@ -924,8 +924,14 @@ class Scheduler(
         initialize_fp8_gemm_config()
         initialize_fp4_gemm_config()
         # The online-FP8 default selection needs the actual loaded model
-        # metadata (not a filename) to decide Flash-Next eligibility.
-        initialize_bf16_gemm_config(self.server_args, model_config=self.model_config)
+        # configuration (metadata, resolved dtype, head tying) and this
+        # scheduler's assigned device, not a filename or a GPU0 probe.
+        initialize_bf16_gemm_config(
+            self.server_args,
+            model_config=self.model_config,
+            device=get_device().device,
+            gpu_id=self.ps.gpu_id,
+        )
 
         # This must be called after initialize_moe_config
         self.require_mlp_sync = require_mlp_sync()
