@@ -57,6 +57,7 @@ native environment and into the release image by
 | GDN commit | `0b0ba4c2b18173303b46dd8ec381735e1615b313` — aa24aa `<2496788660@qq.com>`, cherry picked from `c0771c79b7e2f2bc0edf4fdcb7c43b986a56707a`, upstream FlashInfer #6227 |
 | Compatibility guard | `c84ae2ff261d08bb212f5d72867185876d9d71e7` — Penny `<Pennyroyal@agentmail.to>`, local to this packaging and not an upstream change: `nv_internal/cpp/common/memoryUtils.cu` asked for `<sanitizer/asan_interface.h>` unconditionally, which the image's gcc-15 package does not install, so the include now follows the file's own ASAN condition. Non-ASAN builds need nothing new; ASAN builds still require the header. Drop when the pin ships the guard or the build environment always carries the sanitizer headers |
 | Built module | `flashinfer/data/aot/fused_moe_120/fused_moe_120.so`, compiled with `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
+| Build toolchain | job counts and `CXX` come from the caller; nvcc's host compiler is `CUDAHOSTCXX` when set, mapped onto the `CC` that FlashInfer's `build_cuda_cflags` reads for `-ccbin`, in the build subprocess only |
 | Profile default | the two Next recipes and the two Next startup files export `FLASHINFER_GDN_FP16_ACCUM_MMA=1`; an explicit opt-out is carried by the container settings propagation, the resolved mode is a NIXL namespace field (`gdn_fp16_accum_mma`), and FlashInfer's own default and the 27B profile are unchanged |
 
 `accepted-sources.json` records the SHA-256 of every affected file before and

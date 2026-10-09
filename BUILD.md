@@ -293,7 +293,10 @@ unset old overrides if you want the shared budget to apply.
 Our machine used 24 jobs and four NVCC threads. These limits control compilation, not
 inference threads or GPU token-pool sizes. Keep the GCC 15 compiler variables
 consistent: `CXX` participates in both NVCC host-compiler selection and the
-JIT fingerprint.
+JIT fingerprint. The FlashInfer JIT build reads its host compiler from `CC`, so
+export `CUDAHOSTCXX` as well if you want a specific one there -- the packaging
+step maps it onto `CC` for that build; see
+[FlashInfer SM120 source integration](#flashinfer-sm120-source-integration).
 
 ### Optional wheel packaging
 
@@ -346,6 +349,17 @@ is ignored here -- through the JIT spec's own Ninja build, and installed at
 first place FlashInfer looks. The stock provider wheels can stay for the other
 kernels; the loader prefers the package-local module. No kernel source is
 redesigned, and no host binary or private overlay is copied into the image.
+
+The build keeps your job budget (`MAX_JOBS`) and your `CXX`, and it honours
+`CUDAHOSTCXX` for nvcc's host compiler. That honouring is a mapping, not a
+pass-through: FlashInfer builds nvcc's `-ccbin` from `CC` and never reads
+`CUDAHOSTCXX`, so a host compiler named only in `CUDAHOSTCXX` would be ignored and
+nvcc would bind whatever `CC` the environment carried. The step sets `CC` from
+`CUDAHOSTCXX` in the build subprocess environment alone, which leaves your shell
+and the C++/link compiler as they were, and keeps FlashInfer's own `CC` behaviour
+when `CUDAHOSTCXX` is unset. A build failure names the host compiler that was
+really used. This is what lets `CC=/usr/bin/gcc CUDAHOSTCXX=/usr/bin/g++-15` mean
+what it says on a CUDA 13.3 host whose default GCC is too new for the toolkit.
 
 The third input is not one of the fixes. Stock
 `flashinfer/data/csrc/nv_internal/cpp/common/memoryUtils.cu` asks for

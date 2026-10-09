@@ -501,10 +501,66 @@ def test_build_targets_the_patched_sources_without_the_prebuilt_shortcut():
     assert "PENNY_FLASHINFER_ACCEPTED_CSRC" in code
     assert "FLASHINFER_CSRC_DIR" in code
     text = INSTALLER.read_text()
-    assert 'FLASHINFER_CUDA_ARCH_LIST=source["cuda_arch_list"]' in text
+    assert 'env["FLASHINFER_CUDA_ARCH_LIST"] = source["cuda_arch_list"]' in text
+    # The env the build runs under comes from the helper that maps the host
+    # compiler, so the mapping cannot be bypassed by another call site.
+    assert "env = nvcc_environment(source, package, os.environ)" in text
     assert source_manifest()["cuda_arch_list"] == "12.0f"
     for host_path in ("/home/", "thegrid", ".aot-overlay"):
         assert host_path not in text, host_path
+
+
+def test_the_build_subprocess_gets_the_explicit_cuda_host_compiler(tmp_path):
+    """CUDAHOSTCXX is what an operator means; CC is what FlashInfer reads.
+
+    jit/cpp_ext.py turns CC into nvcc's -ccbin and never looks at CUDAHOSTCXX, so
+    a supported host compiler named only in CUDAHOSTCXX used to be ignored and the
+    build bound the environment's default compiler. The mapping may not leak out of
+    the build subprocess, and it may not touch the C++/link compiler or the jobs.
+    """
+    module = installer()
+    source = source_manifest()
+    caller = {
+        "CC": "/usr/bin/gcc",
+        "CXX": "/usr/bin/g++",
+        "CUDAHOSTCXX": "/usr/bin/g++-15",
+        "MAX_JOBS": "24",
+    }
+    package = tmp_path / "flashinfer"
+
+    env = module.nvcc_environment(source, package, caller)
+    assert env["CC"] == "/usr/bin/g++-15", env
+    assert env["CXX"] == "/usr/bin/g++", "the C++ and link compiler is untouched"
+    assert env["MAX_JOBS"] == "24", "the job budget is untouched"
+    assert env["FLASHINFER_CUDA_ARCH_LIST"] == source["cuda_arch_list"]
+    assert env["PENNY_FLASHINFER_ACCEPTED_CSRC"] == str(package / "data" / "csrc")
+    # The caller's own environment is preserved: an ordinary shell keeps its CC.
+    assert caller == {
+        "CC": "/usr/bin/gcc",
+        "CXX": "/usr/bin/g++",
+        "CUDAHOSTCXX": "/usr/bin/g++-15",
+        "MAX_JOBS": "24",
+    }, caller
+    # The diagnostic names the compiler that is really in force, and says where it
+    # came from, instead of quoting a variable FlashInfer ignores.
+    assert module.nvcc_host_compiler(env) == "/usr/bin/g++-15 (CUDAHOSTCXX)"
+
+    # Without the override the existing CC behaviour stands, and an empty
+    # CUDAHOSTCXX is not a request to change compilers.
+    for unset in (
+        {k: v for k, v in caller.items() if k != "CUDAHOSTCXX"},
+        {**caller, "CUDAHOSTCXX": ""},
+    ):
+        plain = module.nvcc_environment(source, package, unset)
+        assert plain["CC"] == "/usr/bin/gcc", plain
+    assert module.nvcc_host_compiler(plain) == "/usr/bin/gcc (CC)"
+    assert module.nvcc_host_compiler({"CXX": "/usr/bin/g++"}) == "nvcc default"
+    # The step wires the helper in, so the mapping cannot be bypassed by a caller.
+    text = INSTALLER.read_text()
+    assert "env = nvcc_environment(source, package, os.environ)" in text
+    assert (
+        "CUDAHOSTCXX=" not in text.split("def main")[1]
+    ), "no ignored variable in the report"
 
 
 def test_both_installation_paths_run_the_one_step():

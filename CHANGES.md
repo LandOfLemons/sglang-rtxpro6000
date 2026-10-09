@@ -65,7 +65,12 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
   `flashinfer-jit-cache` family, which BUILD.md now installs in the primary
   update block before the packaging step, so an ordinary upgrade works on its
   first pass instead of failing and being repaired; the step still names a stale
-  wheel rather than dying inside the compile. The SM120 compile also carries one
+  wheel rather than dying inside the compile. The step now also honours
+  `CUDAHOSTCXX` for nvcc's host compiler: FlashInfer builds `-ccbin` from `CC` and
+  ignores `CUDAHOSTCXX`, so the value is mapped onto `CC` in the build subprocess
+  environment alone, leaving the caller's `CC`, the C++/link `CXX`, the toolchain
+  versions, the job budget and the source patches as they were. A build failure
+  names the host compiler that was actually used. The SM120 compile also carries one
   build-only guard, `patches/asan-include-compat.patch`, because stock
   `memoryUtils.cu` asked for `<sanitizer/asan_interface.h>` unconditionally and the
   image's `gcc15` package does not install that header: a non-ASAN build now needs

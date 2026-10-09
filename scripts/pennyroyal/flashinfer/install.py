@@ -27,8 +27,11 @@ DIR is the `flashinfer` package directory of a fresh extraction of the pinned
 wheel.  --apply-only, --record and --package exist for the focused CPU check and
 for re-pinning after an approved FlashInfer bump; the installation paths use the
 plain command.  It needs no GPU, no model and no download: the accepted source
-is in this repository.  The build needs a CUDA compiler and honours the existing
-compiler and job-count controls (CUDAHOSTCXX, MAX_JOBS, FLASHINFER_NVCC_THREADS);
+is in this repository.  The build needs a CUDA compiler and keeps the existing
+job-count controls (MAX_JOBS, FLASHINFER_NVCC_THREADS) and the caller's CXX.  For
+nvcc's host compiler it honours CUDAHOSTCXX by handing FlashInfer that value as
+CC, because FlashInfer reads CC for -ccbin and ignores CUDAHOSTCXX; without the
+override its existing CC behaviour stands.
 FLASHINFER_CUDA_ARCH_LIST is set to the accepted SM120 family target for this
 build because FlashInfer ignores TORCH_CUDA_ARCH_LIST here.  Set
 FLASHINFER_WORKSPACE_BASE to keep the ninja objects between runs.
@@ -219,6 +222,33 @@ def apply_accepted_source(package: Path, source: dict) -> list[str]:
     return statuses
 
 
+def nvcc_environment(source: dict, package: Path, environ: dict) -> dict:
+    """The environment of the build subprocess, and of nothing else.
+
+    FlashInfer picks nvcc's host compiler out of CC (jit/cpp_ext.py hands that
+    value to -ccbin) and never reads CUDAHOSTCXX, so an explicit CUDA host
+    compiler has to reach CC or it is silently ignored and nvcc binds whatever CC
+    the environment happened to carry.  The mapping is applied to this copy only:
+    the caller keeps its own CC, CXX stays in charge of the C++ extension and of
+    the link step, and without CUDAHOSTCXX FlashInfer keeps the CC it already had.
+    """
+    env = dict(environ)
+    env["FLASHINFER_CUDA_ARCH_LIST"] = source["cuda_arch_list"]
+    env["PENNY_FLASHINFER_ACCEPTED_CSRC"] = str(package / "data" / "csrc")
+    host_cxx = env.get("CUDAHOSTCXX")
+    if host_cxx:
+        env["CC"] = host_cxx
+    return env
+
+
+def nvcc_host_compiler(env: dict) -> str:
+    """Name the host compiler nvcc is actually being told to use."""
+    cc = env.get("CC")
+    if not cc:
+        return "nvcc default"
+    return f"{cc} (CUDAHOSTCXX)" if env.get("CUDAHOSTCXX") == cc else f"{cc} (CC)"
+
+
 def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
     """Build the patched SM120 module and put it where the loader prefers it.
 
@@ -227,11 +257,7 @@ def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
     """
     require_accepted_pin(source, package)
     require_aligned_jit_cache(source, package)
-    env = dict(
-        os.environ,
-        FLASHINFER_CUDA_ARCH_LIST=source["cuda_arch_list"],
-        PENNY_FLASHINFER_ACCEPTED_CSRC=str(package / "data" / "csrc"),
-    )
+    env = nvcc_environment(source, package, os.environ)
     persistent = env.get("FLASHINFER_WORKSPACE_BASE")
     stack = (
         nullcontext()
@@ -242,13 +268,22 @@ def install_accepted_source(package: Path, source: dict) -> tuple[Path, str]:
         workspace = Path(persistent or temp)
         if not persistent:
             env["FLASHINFER_WORKSPACE_BASE"] = str(workspace)
-        result = subprocess.run(
-            [sys.executable, "-c", BUILD_CODE],
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", BUILD_CODE],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            output = str(error.stderr or "").strip().splitlines()
+            raise fail(
+                f"the {source['aot_module']} build failed with nvcc host compiler "
+                f"{nvcc_host_compiler(env)}, MAX_JOBS="
+                f"{env.get('MAX_JOBS', 'ninja default')}: "
+                f"{output[-1] if output else 'no compiler output'}"
+            ) from error
         built = Path(result.stdout.strip().splitlines()[-1])
         module = source["aot_module"]
         if built.parent.name != module or built.name != f"{module}.so":
@@ -390,9 +425,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
     except subprocess.CalledProcessError as error:
         print(
-            f"{PREFIX}: the {source['aot_module']} build failed "
-            f"(exit {error.returncode}, CUDAHOSTCXX={os.environ.get('CUDAHOSTCXX', 'nvcc default')}, "
-            f"MAX_JOBS={os.environ.get('MAX_JOBS', 'ninja default')})",
+            f"{PREFIX}: a build step failed (exit {error.returncode}, "
+            f"MAX_JOBS={os.environ.get('MAX_JOBS', 'ninja default')}); the "
+            f"compiler output follows",
             file=sys.stderr,
         )
         if error.stderr:
