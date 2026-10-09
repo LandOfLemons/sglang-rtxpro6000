@@ -168,6 +168,31 @@ class ResumeLeaseTests(unittest.TestCase):
     def _open(self, session_id="s"):
         return self.tracker.open_radix_session(session_id)
 
+    def _match(self, req, node):
+        """Pin a matched checkpoint the way a match tick does."""
+        params = MatchPrefixParams(key=RadixKey(token_ids=[]), req=req)
+        self.comp.finalize_match_result_in_tree_core(
+            MatchResult(
+                device_indices=[],
+                last_device_node=node,
+                last_host_node=node,
+                best_match_node=node,
+            ),
+            params,
+            [],
+            0,
+        )
+
+    def _backup(self, node):
+        self.comp.commit_hicache_transfer(
+            node,
+            CacheTransferPhase.BACKUP_HOST,
+            transfers=[
+                SimpleNamespace(host_indices=SimpleNamespace(clone=lambda: [1]))
+            ],
+            cache_actions=[],
+        )
+
     def test_disabled_session_cache_does_not_pin(self):
         self.tracker.enable_session_radix_cache = False
         self.comp.tree_core.enable_session_radix_cache = False
@@ -270,14 +295,7 @@ class ResumeLeaseTests(unittest.TestCase):
         # A backup that still holds the old session id must not pin after close.
         self.comp._pending_resume_backup[node.id] = {"s": generation}
         node.component_data[MAMBA].host_value = [1]
-        self.comp.commit_hicache_transfer(
-            node,
-            CacheTransferPhase.BACKUP_HOST,
-            transfers=[
-                SimpleNamespace(host_indices=SimpleNamespace(clone=lambda: [1]))
-            ],
-            cache_actions=[],
-        )
+        self._backup(node)
         self.assertEqual(node.component_data[MAMBA].host_lock_ref, 0)
         self.assertNotIn(node.id, self.comp._pending_resume_backup)
 
@@ -412,18 +430,7 @@ class ResumeLeaseTests(unittest.TestCase):
         )
 
         # A match on the shared prefix is the only other lease this session holds.
-        params = MatchPrefixParams(key=RadixKey(token_ids=[]), req=req)
-        self.comp.finalize_match_result_in_tree_core(
-            MatchResult(
-                device_indices=[],
-                last_device_node=shared,
-                last_host_node=shared,
-                best_match_node=shared,
-            ),
-            params,
-            [],
-            0,
-        )
+        self._match(req, shared)
 
         # Turn 3 forks to a shallower branch that is already durable on host.
         branch = self._add(_node(3, shared, tokens=[20]))
@@ -455,14 +462,7 @@ class ResumeLeaseTests(unittest.TestCase):
 
         # The abandoned deeper backup lands late: s keeps the new branch, and
         # the other owner still gets its promised checkpoint.
-        self.comp.commit_hicache_transfer(
-            deeper,
-            CacheTransferPhase.BACKUP_HOST,
-            transfers=[
-                SimpleNamespace(host_indices=SimpleNamespace(clone=lambda: [1]))
-            ],
-            cache_actions=[],
-        )
+        self._backup(deeper)
         self.assertEqual(
             self.comp._resume_pins["s"], {"match": shared.id, "commit": branch.id}
         )
@@ -471,6 +471,82 @@ class ResumeLeaseTests(unittest.TestCase):
         self.assertEqual(
             set(self.comp._resume_leases["s"]), {shared.id, branch.id}
         )
+
+    def test_fork_retires_its_ownership_under_another_owners_host_lock(self):
+        """Evictability must not decide who still owns a resume checkpoint.
+
+        Another session's pin stops the host drop at the shared ancestor, yet
+        this session's obsolete pin and pending backup on that ancestor are
+        abandoned too, or the shallower new branch can never take the pin.
+        """
+        first = self._open("s")
+        s_req = self._req("s", first)
+        second = self._open("b")
+        b_req = self._req("b", second)
+        shared = self._add(_node(1, self.root, tokens=[5]))
+        old = self._add(_node(2, shared, tokens=[10, 11, 12, 13]))
+        deeper = self._add(_node(4, old, host=False, tokens=[14, 15, 16, 17]))
+        deeper.component_data[MAMBA].value = [1]
+        shared.children = {2: old}
+        old.children = {4: deeper}
+
+        self._finish(s_req, old)
+        self._finish(s_req, deeper)
+        self._finish(b_req, old)
+        self.comp._note_inserted_resume(b_req, self._insert(deeper))
+        self._match(s_req, shared)
+
+        self.assertEqual(
+            self.comp._resume_pins,
+            {
+                "s": {"commit": old.id, "match": shared.id},
+                "b": {"commit": old.id},
+            },
+        )
+        self.assertEqual(old.component_data[MAMBA].host_lock_ref, 2)
+        self.assertEqual(
+            self.comp._pending_resume_backup[deeper.id], {"s": first, "b": second}
+        )
+
+        branch = self._add(_node(3, shared, tokens=[20]))
+        shared.children = {2: old, 3: branch}
+        self._finish(s_req, branch)
+
+        # s moved to the shallower branch; b still resumes the shared ancestor,
+        # so its host copy stays and only s's lock is dropped.
+        self.assertEqual(
+            self.comp._resume_pins,
+            {
+                "s": {"match": shared.id, "commit": branch.id},
+                "b": {"commit": old.id},
+            },
+        )
+        self.assertEqual(branch.component_data[MAMBA].host_lock_ref, 1)
+        self.assertEqual(old.component_data[MAMBA].host_lock_ref, 1)
+        self.assertEqual(old.component_data[MAMBA].host_value, [1])
+        self.assertEqual(self.freed, [])
+        self.assertEqual(self.comp._pending_resume_backup[deeper.id], {"b": second})
+        self.assertEqual(self.comp._session_leaves["s"], {branch})
+        self.assertEqual(set(self.comp._resume_leases["s"]), {shared.id, branch.id})
+
+        # The abandoned pending callback lands late: it can only pin for b.
+        self._backup(deeper)
+        self.assertEqual(
+            self.comp._resume_pins["s"], {"match": shared.id, "commit": branch.id}
+        )
+        self.assertEqual(self.comp._resume_pins["b"], {"commit": deeper.id})
+        self.assertEqual(deeper.component_data[MAMBA].host_lock_ref, 1)
+
+        # Closing b reclaims the host copies nobody resumes from any more, and
+        # leaves s's two pins and their locks alone.
+        self.tracker.release_radix_session("b")
+        self.assertEqual(self.freed, [old.id, deeper.id])
+        self.assertEqual(
+            self.comp._resume_pins, {"s": {"match": shared.id, "commit": branch.id}}
+        )
+        self.assertEqual(self.comp._pending_resume_backup, {})
+        self.assertEqual(branch.component_data[MAMBA].host_lock_ref, 1)
+        self.assertEqual(shared.component_data[MAMBA].host_lock_ref, 1)
 
 
 if __name__ == "__main__":

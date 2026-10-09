@@ -537,6 +537,28 @@ class MambaComponent(TreeComponent):
             self.cache._free_values(device_frees, host_frees)
         return dropped
 
+    def _abandoned_chain(
+        self, leaf: UnifiedTreeNode, stop: UnifiedTreeNode
+    ) -> list[UnifiedTreeNode]:
+        """Every node below the fork point this session no longer resumes from.
+
+        Deliberately blind to locks and other owners: whether a host copy is
+        reclaimable right now is its own bounded eviction decision, and an
+        ordinary lock must not decide who still owns a resume checkpoint.
+        """
+        chain: list[UnifiedTreeNode] = []
+        cur: Optional[UnifiedTreeNode] = leaf
+        root = self.tree_core.root_node
+        while cur is not None and cur is not stop and cur is not root:
+            chain.append(cur)
+            cur = cur.parent
+        pending = list(leaf.children.values())
+        while pending:
+            node = pending.pop()
+            chain.append(node)
+            pending.extend(node.children.values())
+        return chain
+
     def _drop_abandoned_tail(
         self,
         session_id: str,
@@ -546,10 +568,12 @@ class MambaComponent(TreeComponent):
     ) -> None:
         if stop is None or leaf is stop:
             return
-        # Another session's marker can block the host drop below the fork, but
-        # it says nothing about this session's own ownership of the branch it
-        # just abandoned.
-        self._release_own_pin(session_id, leaf)
+        # Retire this session's pins, host leases and pending backup ownership
+        # across the whole abandoned branch first, whatever the host drop can
+        # reach. Another owner's pin keeps the shared host data alive; it does
+        # not keep this session's obsolete pin or its late backup callback.
+        for node in self._abandoned_chain(leaf, stop):
+            self._release_own_pin(session_id, node)
         path = self._tail_below(leaf, stop, session_id)
         if not path:
             return
