@@ -231,8 +231,8 @@ def initialize_bf16_gemm_config(server_args: ServerArgs) -> None:
             ),
         )
         logger.info(
-            "Flash-Next online FP8 enabled on SM120: eligible BF16 linears use "
-            "MXFP8; HyperConnection mix and lm_head use rowwise FP8"
+            "Flash-Next online FP8 enabled on SM120: eligible BF16 linears, "
+            "HyperConnection mix and lm_head all use rowwise (per-output-channel) FP8"
         )
 
     _BF16_GEMM_BACKEND = backend
