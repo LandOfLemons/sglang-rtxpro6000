@@ -51,6 +51,20 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
   cache cleanup remains under the user's control.
 - **27B/DFlash2:** avoid blocking copies of small prefill metadata arrays,
   adapted from [#40091](https://github.com/sgl-project/sglang/pull/40091).
+- **FlashInfer SM120 kernels:** the accepted fused-MoE and GDN sources are now
+  packaged into every installation instead of living in a private overlay. Both
+  suspected Xid109 candidates are in the shipped source: the three fused-MoE
+  commits (`5e86c489f575`, `b9fa8893102d`, `2a4d8d3a9501`) by Penny
+  `<Pennyroyal@agentmail.to>`, ported from the `aiueo52/flash-next-rtxpro6000`
+  donor patches, and aa24aa's GDN FP16-accumulate MMA commit `0b0ba4c2b18173`
+  (upstream FlashInfer #6227). See
+  [FlashInfer SM120 source integration](BUILD.md#flashinfer-sm120-source-integration)
+  for the pin, the build path and the profile default, and
+  [PROVENANCE.md](PROVENANCE.md#flashinfer-sm120-accepted-source) for the
+  attribution. FlashInfer's own GDN default stays off; only the Next recipes and
+  Next startup files opt in, and `FLASHINFER_MOE_FUSED_PROLOGUE=0` remains the
+  MoE kill switch. Online FP8, routing, GEMV and normalization defaults are
+  untouched.
 - **NIXL and host allocation:** correct hybrid storage-component counts and
   include opt-in pinned-host allocation/device-alias support adapted from
   [LandOfLemons' PR #24](https://github.com/jpezzulli/sglang-rtxpro6000/pull/24).
@@ -59,8 +73,11 @@ BF16 NVMe PLE staging fix previously supplied as an optional v2.5.2 patch.
 Both supported profiles completed full reasoning and tool runs, plus fresh
 64K disk-cache restoration and device-replay checks. The 27B tool rerun used
 the corrected uncapped validation runner. Existing long-context, media and
-performance evidence retains its original source and date. The dependency
-stack and model weights are unchanged.
+performance evidence retains its original source and date. The model weights,
+token map and sampler are unchanged; the FlashInfer package pin and its SM120
+module are not — see the packaging note above. The packaging integration itself
+is checked without a GPU; the compile, the rebuilt image and the two-profile
+GPU regression for these kernels are still owed by the release host.
 
 Literal model end-of-turn markers can still terminate a response; this release
 does not change that model/runtime behavior.
