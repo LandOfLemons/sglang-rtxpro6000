@@ -110,7 +110,6 @@ from sglang.srt.lora.lora_overlap_loader import LoRAOverlapLoader
 from sglang.srt.managers.disagg_service import maybe_create_ascend_config_store
 from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
 from sglang.srt.managers.io_struct import (
-    MMInputsProcessError,
     AbortReq,
     ActiveRanksOutput,
     AddExternalCorpusReqInput,
@@ -149,6 +148,7 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterFromTensorsReqOutput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
+    MMInputsProcessError,
     OpenSessionReqInput,
     PauseGenerationReqInput,
     ProfileReq,

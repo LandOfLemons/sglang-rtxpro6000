@@ -12,10 +12,10 @@ Expected without the fix: the TP0 scheduler dies and the engine restarts.
 
 Usage: shm_fault_injection.py [--url http://127.0.0.1:8001] [--n 40] [--conc 6]
 """
+
 import argparse
 import base64
 import concurrent.futures as cf
-import io
 import json
 import os
 import threading
@@ -27,7 +27,12 @@ ap.add_argument("--url", default="http://127.0.0.1:8001")
 ap.add_argument("--model", default="pennyroyal")
 ap.add_argument("--n", type=int, default=40)
 ap.add_argument("--conc", type=int, default=6)
-ap.add_argument("--sabotage", type=float, default=1.0, help="fraction of time the saboteur is active")
+ap.add_argument(
+    "--sabotage",
+    type=float,
+    default=1.0,
+    help="fraction of time the saboteur is active",
+)
 ap.add_argument("--image", default="/tmp/vision_test.png")
 args = ap.parse_args()
 
@@ -60,8 +65,14 @@ def one(i):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Request {i}: name the shapes in the image, briefly."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                    {
+                        "type": "text",
+                        "text": f"Request {i}: name the shapes in the image, briefly.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                    },
                 ],
             }
         ],
@@ -75,9 +86,17 @@ def one(i):
     try:
         with urllib.request.urlopen(req, timeout=180) as r:
             d = json.loads(r.read())
-            return ("ok", round(time.time() - t0, 1), (d["choices"][0]["message"]["content"] or "")[:40])
+            return (
+                "ok",
+                round(time.time() - t0, 1),
+                (d["choices"][0]["message"]["content"] or "")[:40],
+            )
     except urllib.error.HTTPError as e:
-        return ("http%d" % e.code, round(time.time() - t0, 1), e.read()[:120].decode(errors="replace"))
+        return (
+            "http%d" % e.code,
+            round(time.time() - t0, 1),
+            e.read()[:120].decode(errors="replace"),
+        )
     except Exception as e:
         return ("exc", round(time.time() - t0, 1), str(e)[:120])
 
@@ -103,5 +122,10 @@ stop.set()
 time.sleep(1)
 from collections import Counter
 
-print("summary:", Counter(r[0] for r in results), "| segments removed by saboteur:", removed)
+print(
+    "summary:",
+    Counter(r[0] for r in results),
+    "| segments removed by saboteur:",
+    removed,
+)
 print("health after:", health())
