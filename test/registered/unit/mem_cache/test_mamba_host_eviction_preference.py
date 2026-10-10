@@ -43,6 +43,7 @@ class _HostBoundaryFixture:
 
         self.full = object.__new__(FullComponent)
         self.mamba = object.__new__(MambaComponent)
+
         def session_predicate(node):
             return node.component_data[ComponentType.MAMBA].session_ref > 0
 

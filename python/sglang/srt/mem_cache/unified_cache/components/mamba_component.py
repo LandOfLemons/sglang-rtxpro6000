@@ -183,7 +183,9 @@ class MambaComponent(TreeComponent):
         except (KeyError, IndexError):
             return None
 
-    def _lease_log(self, op: str, pin: str, session_id: str, node: UnifiedTreeNode) -> None:
+    def _lease_log(
+        self, op: str, pin: str, session_id: str, node: UnifiedTreeNode
+    ) -> None:
         held = sum(
             1 for locked in self._resume_leases.get(session_id, {}).values() if locked
         )
@@ -298,9 +300,8 @@ class MambaComponent(TreeComponent):
         if current_id is not None and current is None:
             pins.pop(pin, None)
             dropped_dead = True
-        elif (
-            current is not None
-            and self._token_depth(node) < self._token_depth(current)
+        elif current is not None and self._token_depth(node) < self._token_depth(
+            current
         ):
             return
         if not self._host_lock_resume(session_id, node, pin):
@@ -351,9 +352,9 @@ class MambaComponent(TreeComponent):
             self._promote_pending_backup(node, durable=True)
             self._pin_resume(session_id, node, "commit")
             return
-        self._pending_resume_backup.setdefault(node.id, {})[session_id] = (
-            req.session_generation
-        )
+        self._pending_resume_backup.setdefault(node.id, {})[
+            session_id
+        ] = req.session_generation
 
     def _release_resume_leases(self, session_id: str) -> None:
         self._resume_pins.pop(session_id, None)
@@ -419,8 +420,7 @@ class MambaComponent(TreeComponent):
                 if any(other != session_id for other in session_ids):
                     return parent
                 if any(
-                    other != session_id
-                    for other in self._resume_sessions_for(parent)
+                    other != session_id for other in self._resume_sessions_for(parent)
                 ):
                     return parent
             cur = parent
@@ -520,11 +520,7 @@ class MambaComponent(TreeComponent):
                     continue
                 if self._drop_blocked(node, session_id, nodes[0]):
                     continue
-                if (
-                    cd.host_value is None
-                    or cd.host_lock_ref > 0
-                    or cd.lock_ref > 0
-                ):
+                if cd.host_value is None or cd.host_lock_ref > 0 or cd.lock_ref > 0:
                     continue
                 self.tree_core._evict_component_and_detach_lru(
                     node,
@@ -631,9 +627,8 @@ class MambaComponent(TreeComponent):
                 if node.component_data[ct].value is not None:
                     self.tree_core.lru_lists[ct].reset_node_mru(node)
                 host_lru = self.tree_core.host_lru_lists[ct]
-                if (
-                    node.component_data[ct].host_value is not None
-                    and host_lru.in_list(node)
+                if node.component_data[ct].host_value is not None and host_lru.in_list(
+                    node
                 ):
                     host_lru.reset_node_mru(node)
             case LRURefreshPhase.INSERT_END:
@@ -1339,9 +1334,7 @@ class MambaComponent(TreeComponent):
                 cd = node.component_data[ct]
                 if cd.host_value is None:
                     cd.host_value = transfers[0].host_indices.clone()
-                self._promote_pending_backup(
-                    node, durable=cd.host_value is not None
-                )
+                self._promote_pending_backup(node, durable=cd.host_value is not None)
 
         elif phase == CacheTransferPhase.LOAD_BACK:
             if not transfers:

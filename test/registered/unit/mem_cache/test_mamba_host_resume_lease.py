@@ -286,9 +286,7 @@ class ResumeLeaseTests(unittest.TestCase):
         node.component_data[MAMBA].value = [1]
         req = self._req("s", generation)
         self.comp._note_inserted_resume(req, self._insert(node))
-        self.assertEqual(
-            self.comp._pending_resume_backup[node.id], {"s": generation}
-        )
+        self.assertEqual(self.comp._pending_resume_backup[node.id], {"s": generation})
         self.tracker.release_radix_session("s")
         self.assertNotIn(node.id, self.comp._pending_resume_backup)
 
@@ -468,9 +466,7 @@ class ResumeLeaseTests(unittest.TestCase):
         )
         self.assertEqual(self.comp._resume_pins["b"], {"commit": deeper.id})
         self.assertEqual(deeper.component_data[MAMBA].host_lock_ref, 1)
-        self.assertEqual(
-            set(self.comp._resume_leases["s"]), {shared.id, branch.id}
-        )
+        self.assertEqual(set(self.comp._resume_leases["s"]), {shared.id, branch.id})
 
     def test_fork_retires_its_ownership_under_another_owners_host_lock(self):
         """Evictability must not decide who still owns a resume checkpoint.

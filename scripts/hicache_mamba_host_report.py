@@ -145,7 +145,9 @@ def _occupancy(
     return round(area / span, 2), peak, round(100 * busy / span, 1)
 
 
-def _phases(row: dict) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+def _phases(
+    row: dict,
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
     """Forward, prefill, and decode intervals. The log timestamp is completion."""
     finish = row["t"]
     forward_start = finish - row["forward_ms"] / 1000
@@ -180,7 +182,9 @@ def parse_requests(lines) -> list[dict]:
         if not match:
             continue
         fields = match.groupdict()
-        when = datetime.strptime(fields["ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        when = datetime.strptime(fields["ts"], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
         # The bracket time is whole seconds. entry_time is the precise arrival,
         # so arrival + queue + forward is the real completion.
         entry = float(fields["entry"]) if fields.get("entry") else 0.0
@@ -252,9 +256,9 @@ def summarize(rows: list[dict]) -> dict:
         "n": len(rows),
         "span_s": round(wall, 1),
         "out_tok_s": round(output / wall) if wall else 0,
-        "mean_req_tok_s": round(sum(request_rates) / len(request_rates))
-        if request_rates
-        else 0,
+        "mean_req_tok_s": (
+            round(sum(request_rates) / len(request_rates)) if request_rates else 0
+        ),
         "busy_pct": busy,
         "mean_inflight": mean,
         "peak_inflight": peak,
