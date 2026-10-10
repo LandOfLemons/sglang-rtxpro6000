@@ -17,6 +17,13 @@ import torch
 import triton
 import triton.language as tl
 
+from sglang.srt.environ import envs
+
+#: Donor hard limit of the W8A16 GEMV (``assert M <= 16``; below that the plan
+#: table may pick the M_PAD 1 broadcast path).  ``SGLANG_FP8_W8A16_GEMV_MAX_M``
+#: can only lower the row budget, never raise it past what the kernel promises.
+_W8A16_GEMV_DONOR_MAX_M = 16
+
 _MAX_KERNEL_ROWS = 32
 _DEQUANT_TARGET_BYTES = 64 * 1024 * 1024
 _SCALE_ATTR = "_sm120_rowwise_scale"
@@ -125,6 +132,7 @@ def replace_linear_weight_rowwise_fp8(linear: torch.nn.Module) -> int:
             f"SM120 online FP8 expected a BF16 resident weight, got {weight.dtype}"
         )
     original_bytes = weight.numel() * weight.element_size()
+    _prealloc_w8a16_gemv_scratch(weight.device)
     new_parameter = _rowwise_parameter(weight.data, weight)
     if hasattr(weight, "weight_loader"):
         # A later weight update must recompute both values and scales. Keeping
@@ -180,9 +188,7 @@ def _ingest_rowwise_weight(
     linear.weight = new_parameter
 
 
-def attach_rowwise_ingest(
-    linears, *, target_device: torch.device | None = None
-) -> int:
+def attach_rowwise_ingest(linears, *, target_device: torch.device | None = None) -> int:
     """Attach an all-or-nothing loader to meta-born BF16 linear weights."""
     checked = []
     for linear in linears:
@@ -207,6 +213,7 @@ def select_rowwise_weight_rows(
 ) -> torch.Tensor:
     """Select draft-vocabulary rows without dropping matching scale metadata."""
     scale = _require_rowwise_scale(weight)
+    _prealloc_w8a16_gemv_scratch(weight.device)
     selected_data = weight.index_select(0, row_indices)
     if isinstance(weight, torch.nn.Parameter):
         selected = torch.nn.Parameter(selected_data, requires_grad=False)
@@ -307,6 +314,53 @@ def _rowwise_fp8_gemv_kernel(
     )
 
 
+def w8a16_gemv_enabled() -> bool:
+    """Whether the opt-in donor W8A16 output-head fast path may be considered."""
+    return bool(envs.SGLANG_FP8_W8A16_GEMV.get())
+
+
+def _prealloc_w8a16_gemv_scratch(device: torch.device) -> None:
+    """Materialize the donor kernel's split-K scratch before warm-up/capture.
+
+    Weight installation is the last hook that runs before the CUDA graphs are
+    captured, and the scratch must not come from a graph's private memory pool.
+    """
+    if not w8a16_gemv_enabled():
+        return
+    from sglang.srt.layers.quantization.w8a16_gemv import prealloc
+
+    prealloc(device)
+
+
+def w8a16_gemv_supported(
+    hidden: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor | None
+) -> bool:
+    """Whether `rowwise_fp8_lm_head_logits` may take the donor W8A16 GEMV.
+
+    The donor's contract (`Fp8LinearMethod._w8a16_gemv_ok` in its fp8.py),
+    restated for the resident rowwise representation: weight-only FP8 with a
+    per-output-row fp32 scale, no activation quantization, a bf16 2-D
+    activation of at most the donor's row limit, and an [N, K] weight whose K
+    axis is contiguous, which is how the rowwise Parameter is stored.
+    """
+    if not w8a16_gemv_enabled() or scale is None or hidden.dim() != 2:
+        return False
+    max_rows = min(envs.SGLANG_FP8_W8A16_GEMV_MAX_M.get(), _W8A16_GEMV_DONOR_MAX_M)
+    return (
+        1 <= hidden.shape[0] <= max_rows
+        and hidden.dtype is torch.bfloat16
+        and hidden.stride(1) == 1
+        and hidden.shape[1] == weight.shape[1]
+        and weight.dtype is torch.float8_e4m3fn
+        and weight.stride(1) == 1
+        and scale.dtype is torch.float32
+        and scale.shape == (weight.shape[0],)
+        and scale.stride(0) == 1
+        and scale.device == weight.device
+        and hidden.device == weight.device
+    )
+
+
 def rowwise_fp8_lm_head_logits(
     hidden_states: torch.Tensor, weight: torch.Tensor
 ) -> torch.Tensor:
@@ -325,6 +379,15 @@ def rowwise_fp8_lm_head_logits(
             "SM120 online FP8 lm_head input width does not match its weight"
         )
     rows, columns = hidden_2d.shape[0], weight.shape[0]
+    # Opt-in candidate (SGLANG_FP8_W8A16_GEMV=1): the donor's low-row W8A16 GEMV
+    # on the resident weight/scale as they are, with no requantization and no
+    # second copy.  Everything outside its contract -- larger batches such as
+    # C6's 24-row verification and prefill, other dtypes or layouts -- keeps the
+    # original kernel and dequantizing fallback below, untouched for comparison.
+    if w8a16_gemv_supported(hidden_2d, weight, scale):
+        from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
+
+        return w8a16_gemv(hidden_2d, weight, scale).reshape(*original_shape, columns)
     output = torch.empty(
         (rows, columns), dtype=torch.bfloat16, device=hidden_states.device
     )

@@ -32,6 +32,19 @@ The conversion supports recognized Flash-Next modules on exact SM120. Other
 hardware and module shapes fail at startup. The 27B/DFlash2 launcher keeps its
 existing precision path.
 
+### Optional: donor W8A16 GEMV for the output heads
+
+`SGLANG_FP8_W8A16_GEMV=1` additionally routes the resident row-wise FP8 target
+and FR-Spec draft heads through the donor's low-row (1–16 tokens) Triton W8A16
+GEMV (`python/sglang/srt/layers/quantization/w8a16_gemv.py`, direct port of
+aiueo52/sglang-rtxpro6000@5105985116eb00dea8e6138aabeb5363387cb9de). Weights,
+row scales and the FR-Spec token map are used as they are; nothing is
+re-quantized. Prefill, the 24-token verification batch and any layout the kernel
+does not read stay on the original head kernel, so the two are A/B comparable.
+It reserves about 16 MiB of split-K scratch per device when enabled, allocated
+before CUDA-graph capture. `SGLANG_FP8_W8A16_GEMV_MAX_M` (default 16) can only
+narrow the row budget. Off by default; hardware qualification is pending.
+
 ## What changes and what stays the same
 
 “Online” describes a one-time conversion of eligible BF16 weights while the
