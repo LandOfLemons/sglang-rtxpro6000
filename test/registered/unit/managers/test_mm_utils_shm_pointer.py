@@ -28,18 +28,22 @@ from sglang.srt.managers.io_struct import (
     MMInputsProcessError,
     TokenizedGenerateReqInput,
 )
-from sglang.srt.managers.schedule_batch import FINISH_ABORT, MultimodalInputs
-from sglang.srt.multimodal.transport.cuda_ipc import CudaIpcTensorTransportProxy
-from sglang.srt.managers.scheduler import Scheduler
-from sglang.srt.sampling.sampling_params import SamplingParams
-from sglang.srt.session.session_controller import Session
 from sglang.srt.managers.mm_utils import (
     ShmPointerMMData,
     discard_shm_features,
     has_shm_features,
     unwrap_shm_features,
 )
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.schedule_batch import (
+    FINISH_ABORT,
+    Modality,
+    MultimodalDataItem,
+    MultimodalInputs,
+)
+from sglang.srt.managers.scheduler import Scheduler
+from sglang.srt.multimodal.transport.cuda_ipc import CudaIpcTensorTransportProxy
+from sglang.srt.sampling.sampling_params import SamplingParams
+from sglang.srt.session.session_controller import Session
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -116,7 +120,9 @@ class TestShmPointerMMData(CustomTestCase):
 def _tokenized_req(**overrides) -> TokenizedGenerateReqInput:
     """Build a TokenizedGenerateReqInput with every required field defaulted to None."""
     kwargs = {
-        f.name: None for f in msgspec.structs.fields(TokenizedGenerateReqInput) if f.required
+        f.name: None
+        for f in msgspec.structs.fields(TokenizedGenerateReqInput)
+        if f.required
     }
     kwargs.update(rid="r1", input_text="", input_ids=[1, 2, 3])
     kwargs.update(overrides)
@@ -139,12 +145,17 @@ class TestMarkerConsumers(CustomTestCase):
     def test_shm_helpers_tolerate_the_marker(self):
         req = self._marker_req()
         self.assertFalse(has_shm_features([req]))  # next PP stage's detection
-        with mock.patch("sglang.srt.managers.mm_utils._get_is_default_transport", return_value=False), mock.patch(
-            "sglang.srt.managers.mm_utils.get_serving", return_value=SimpleNamespace(skip_tokenizer_init=False)
+        with mock.patch(
+            "sglang.srt.managers.mm_utils._get_is_default_transport", return_value=False
+        ), mock.patch(
+            "sglang.srt.managers.mm_utils.get_serving",
+            return_value=SimpleNamespace(skip_tokenizer_init=False),
         ):
             self.assertIs(unwrap_shm_features(req), req)
         discard_shm_features(req)  # must not raise
-        self.assertIsInstance(req.mm_inputs, MMInputsProcessError)  # rejection semantics kept
+        self.assertIsInstance(
+            req.mm_inputs, MMInputsProcessError
+        )  # rejection semantics kept
         batch = BatchTokenizedGenerateReqInput(batch=[req])
         self.assertFalse(has_shm_features([batch]))
         discard_shm_features(batch)
@@ -177,7 +188,8 @@ class TestMarkerConsumers(CustomTestCase):
             sampling_params=SamplingParams(max_new_tokens=4),
         )
         with mock.patch(
-            "sglang.srt.managers.schedule_batch.get_parallel", return_value=SimpleNamespace(tp_rank=0)
+            "sglang.srt.managers.schedule_batch.get_parallel",
+            return_value=SimpleNamespace(tp_rank=0),
         ):
             self.assertTrue(Scheduler._reject_mm_transport_failure(stub, req))
         self.assertEqual(len(queued), 1)
@@ -189,7 +201,9 @@ class TestMarkerConsumers(CustomTestCase):
         self.assertEqual(session_touched, [])
         # a healthy request is not touched by the guard
         self.assertFalse(
-            Scheduler._reject_mm_transport_failure(stub, _tokenized_req(input_ids=[1, 2], mm_inputs=None))
+            Scheduler._reject_mm_transport_failure(
+                stub, _tokenized_req(input_ids=[1, 2], mm_inputs=None)
+            )
         )
 
     def _stub_scheduler(self, mode, queued, streamed, touched):
@@ -213,7 +227,9 @@ class TestMarkerConsumers(CustomTestCase):
             init_req_max_new_tokens=lambda req: None,
             _add_request_to_queue=lambda req, is_retracted=False: queued.append(req),
             output_streamer=SimpleNamespace(
-                stream_output=lambda reqs, return_logprob, skip_req=None: streamed.append(list(reqs))
+                stream_output=lambda reqs, return_logprob, skip_req=None: streamed.append(
+                    list(reqs)
+                )
             ),
         )
 
@@ -230,7 +246,8 @@ class TestMarkerConsumers(CustomTestCase):
                 bootstrap_room=4242,
             )
             with mock.patch(
-                "sglang.srt.managers.schedule_batch.get_parallel", return_value=SimpleNamespace(tp_rank=0)
+                "sglang.srt.managers.schedule_batch.get_parallel",
+                return_value=SimpleNamespace(tp_rank=0),
             ):
                 self.assertTrue(Scheduler._reject_mm_transport_failure(stub, req), mode)
             self.assertEqual(queued, [], mode)
@@ -243,13 +260,18 @@ class TestMarkerConsumers(CustomTestCase):
             self.assertEqual(fin.err_type, "InternalServerError")
             self.assertIn("lost segment", fin.message)
             # coordinates survive so nothing downstream sees a None address
-            self.assertEqual((out.bootstrap_host, out.bootstrap_port, out.bootstrap_room), ("10.0.0.7", 8998, 4242))
+            self.assertEqual(
+                (out.bootstrap_host, out.bootstrap_port, out.bootstrap_room),
+                ("10.0.0.7", 8998, 4242),
+            )
 
 
 class _FakePoolProxy(CudaIpcTensorTransportProxy):
     """A CUDA pool slice without CUDA: records acknowledgements, forbids reconstruction."""
 
-    def __init__(self):  # noqa: D401 - bypass the real constructor (needs tensors + a pool)
+    def __init__(
+        self,
+    ):  # noqa: D401 - bypass the real constructor (needs tensors + a pool)
         self._consumer_acknowledged = False
         self.acks = []
 
@@ -271,7 +293,9 @@ class _FakePackedView(_FakePoolProxy):
         self._packed_owner = owner
 
     def acknowledge_consumption(self, consumer_count=None):
-        raise RuntimeError("Packed CUDA VMM features must be reconstructed before release")
+        raise RuntimeError(
+            "Packed CUDA VMM features must be reconstructed before release"
+        )
 
 
 class TestMixedTransportRejection(CustomTestCase):
@@ -302,7 +326,9 @@ class TestMixedTransportRejection(CustomTestCase):
         discard_shm_features(req)
 
         self.assertEqual(vmm.acks, [1])  # this rank's slot, once
-        self.assertEqual(owner.acks, [1])  # one packed transfer, two views -> one release
+        self.assertEqual(
+            owner.acks, [1]
+        )  # one packed transfer, two views -> one release
         self.assertEqual(view_a.acks, [])
         self.assertEqual(view_b.acks, [])
         self.assertFalse(_segment_exists(shm.shm_name))
@@ -317,7 +343,9 @@ class TestMixedTransportRejection(CustomTestCase):
     def test_release_skips_already_acknowledged_slices(self):
         proxy = _FakePoolProxy()
         proxy.acknowledge_consumption(1)
-        item = MultimodalDataItem(modality=Modality.IMAGE, offsets=[(0, 1)], feature=proxy)
+        item = MultimodalDataItem(
+            modality=Modality.IMAGE, offsets=[(0, 1)], feature=proxy
+        )
         self.assertEqual(item.release_transport_proxies(), 0)
         self.assertEqual(proxy.acks, [1])
 

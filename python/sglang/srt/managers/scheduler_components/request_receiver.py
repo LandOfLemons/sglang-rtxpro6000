@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import (
@@ -20,9 +19,9 @@ from torch.distributed import ReduceOp, all_reduce, barrier
 from sglang.srt.disaggregation.utils import prepare_abort
 from sglang.srt.environ import envs
 from sglang.srt.managers.io_struct import (
-    MMInputsProcessError,
     BatchTokenizedEmbeddingReqInput,
     BatchTokenizedGenerateReqInput,
+    MMInputsProcessError,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
     sock_recv,
