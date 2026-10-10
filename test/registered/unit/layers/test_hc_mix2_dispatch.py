@@ -120,8 +120,8 @@ from sglang.kernels.ops.gemm.sm120_online_fp8 import (  # noqa: E402
     _SCALE_ATTR,
     quantize_rowwise_fp8,
 )
-from sglang.srt.layers import hc_mix_triton  # noqa: E402
 from sglang.srt.layers import hc_mix2_triton as mix2  # noqa: E402
+from sglang.srt.layers import hc_mix_triton  # noqa: E402
 from sglang.srt.layers import hyperconnection as hyp  # noqa: E402
 from sglang.test.ci.ci_register import register_cpu_ci  # noqa: E402
 
@@ -485,9 +485,7 @@ def test_scale_override_is_passed_through(sm120, recorder):
     hyper_input, norm_w, down, up = _resident_pair(seed=3)
     s_down = getattr(down, _SCALE_ATTR).clone()
     s_up = getattr(up, _SCALE_ATTR).clone()
-    mix2.hc_norm_mix2(
-        hyper_input[:4], norm_w, EPS, down, up, HC, HS, s_down, s_up
-    )
+    mix2.hc_norm_mix2(hyper_input[:4], norm_w, EPS, down, up, HC, HS, s_down, s_up)
     launched = recorder.by_name()
     assert launched["_hc_down_kernel"][1][3] is s_down
     assert launched["_hc_up_kernel"][1][4] is s_up
@@ -587,10 +585,9 @@ def test_mix_falls_back_to_the_existing_path(monkeypatch, sm120):
     monkeypatch.setattr(hyp, "hc_norm_mix2_supported", lambda *args: False)
     calls = []
     layer = _bare_layer()
-    layer._mix_compute = (
-        lambda x, wd, wu, hc, hs: calls.append((x, wd, wu))
-        or torch.zeros(24, HS, dtype=torch.bfloat16)
-    )
+    layer._mix_compute = lambda x, wd, wu, hc, hs: calls.append(
+        (x, wd, wu)
+    ) or torch.zeros(24, HS, dtype=torch.bfloat16)
     down, up = (
         _attrs_tensor((LOWRANK, K), torch.bfloat16),
         _attrs_tensor((K, LOWRANK), torch.bfloat16),

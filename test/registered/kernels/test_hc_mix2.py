@@ -123,9 +123,7 @@ def layer() -> GatedResidual:
             HS
         )
         built.hc_norm.weight.data.copy_(
-            (
-                _randn((K,), seed=13, scale=0.05).float() + branch_bias
-            ).to(torch.bfloat16)
+            (_randn((K,), seed=13, scale=0.05).float() + branch_bias).to(torch.bfloat16)
         )
         built.block_inject_weight.weight.data.copy_(
             _randn((HC, K), seed=11, scale=1.0 / math.sqrt(K))
@@ -223,9 +221,7 @@ def test_hc_norm_mix2_atomic_order_is_not_promiseable(layer, rows):
     hyper_input = _randn((rows, K), seed=200 + rows, scale=0.25)
     down, s_down, up, s_up = _weights(layer)
     first, _ = hc_norm_mix2(hyper_input, layer.hc_norm.weight, EPS, down, up, HC, HS)
-    second, _ = hc_norm_mix2(
-        hyper_input, layer.hc_norm.weight, EPS, down, up, HC, HS
-    )
+    second, _ = hc_norm_mix2(hyper_input, layer.hc_norm.weight, EPS, down, up, HC, HS)
     ref = _reference_mixed(
         _reference_norm(hyper_input, layer.hc_norm.weight), down, s_down, up, s_up
     )
@@ -300,9 +296,13 @@ def test_gated_residual_mix_uses_mix2_and_feeds_combine(layer, rows, mix2_spy):
         F.linear(normed.float(), layer.block_inject_weight.weight.float()) / HC
     )
     expected = (
-        hyper_input.float().unflatten(-1, (HC, HS))
-        + block_output.float().unsqueeze(-2) * inject.float().unsqueeze(-1)
-    ).flatten(-2).to(torch.bfloat16)
+        (
+            hyper_input.float().unflatten(-1, (HC, HS))
+            + block_output.float().unsqueeze(-2) * inject.float().unsqueeze(-1)
+        )
+        .flatten(-2)
+        .to(torch.bfloat16)
+    )
     nrmse, cosine = _normalized_error(combined, expected)
     assert nrmse <= 0.03 and cosine >= 0.999
 
@@ -329,8 +329,7 @@ def test_wider_rows_keep_the_existing_path(layer, rows, mix2_spy):
 
 
 def test_tp2_and_deterministic_keep_the_existing_path(layer, monkeypatch, mix2_spy):
-    from sglang.srt.layers import hc_mix2_triton
-    from sglang.srt.layers import hc_mix_triton
+    from sglang.srt.layers import hc_mix2_triton, hc_mix_triton
 
     hyper_input = _randn((4, K), seed=800, scale=0.25)
     down, s_down, up, s_up = _weights(layer)

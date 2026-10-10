@@ -73,9 +73,7 @@ pytestmark = pytest.mark.skipif(
 def _randn(shape, *, seed: int, scale: float) -> torch.Tensor:
     generator = torch.Generator(device="cuda").manual_seed(seed)
     return (
-        torch.randn(
-            shape, generator=generator, device="cuda", dtype=torch.bfloat16
-        )
+        torch.randn(shape, generator=generator, device="cuda", dtype=torch.bfloat16)
         * scale
     )
 
@@ -262,9 +260,7 @@ def test_dense_projection_numerics_and_path_selection(
     # activation-FP8 quantization loss (SM120-measured ~.0267 at M17), NOT a
     # GEMM-correctness failure and not a model-quality result. Kept loose on
     # purpose; the GEMM verdict is the FP64 check above.
-    _assert_normalized_error(
-        actual, bf16_a_reference, max_nrmse=0.05, min_cosine=0.998
-    )
+    _assert_normalized_error(actual, bf16_a_reference, max_nrmse=0.05, min_cosine=0.998)
     if rows > DONOR_MAX_M:
         # larger M uses the resident rowwise FP8 through apply_fp8_linear
         assert fallback_calls[0]["weight"] is layer.weight
@@ -321,8 +317,12 @@ def test_fused_norm_out_proj_matches_standalone_norm_and_projection(
     core = _randn((tokens * NUM_V_HEADS, HEAD_V_DIM), seed=401, scale=0.5)
     z = _randn((tokens * NUM_V_HEADS, HEAD_V_DIM), seed=402, scale=1.0)
     norm = RMSNormGated(
-        HEAD_V_DIM, eps=1e-6, group_size=None, norm_before_gate=True,
-        device="cuda", dtype=torch.bfloat16,
+        HEAD_V_DIM,
+        eps=1e-6,
+        group_size=None,
+        norm_before_gate=True,
+        device="cuda",
+        dtype=torch.bfloat16,
     )
     # nonzero, non-unit gate weights: y = x*rstd*w*silu(z) must move.
     norm.weight.data.copy_(
@@ -354,8 +354,10 @@ def test_fused_norm_out_proj_matches_standalone_norm_and_projection(
     core_fp32 = core.float()
     rstd = torch.rsqrt(core_fp32.pow(2).mean(-1, keepdim=True) + 1e-6)
     sigmoid_expected = (
-        core_fp32 * rstd * norm.weight.data.float() * torch.sigmoid(z.float())
-    ).to(torch.bfloat16).reshape(tokens, GDN_K)
+        (core_fp32 * rstd * norm.weight.data.float() * torch.sigmoid(z.float()))
+        .to(torch.bfloat16)
+        .reshape(tokens, GDN_K)
+    )
     actual_sig = method.apply_norm_gated(
         layer,
         core.reshape(tokens, GDN_K),
@@ -371,18 +373,32 @@ def test_fused_norm_out_proj_matches_standalone_norm_and_projection(
 
     # flag off -> decline to None (caller keeps the original norm + out_proj)
     monkeypatch.setattr(w8a16_gemv_module, "NORM_INTO_GEMV", False)
-    assert method.apply_norm_gated(
-        layer, core.reshape(tokens, GDN_K), z.reshape(tokens, GDN_K),
-        norm.weight.data, HEAD_V_DIM, 1e-6,
-    ) is None
+    assert (
+        method.apply_norm_gated(
+            layer,
+            core.reshape(tokens, GDN_K),
+            z.reshape(tokens, GDN_K),
+            norm.weight.data,
+            HEAD_V_DIM,
+            1e-6,
+        )
+        is None
+    )
     monkeypatch.setattr(w8a16_gemv_module, "NORM_INTO_GEMV", True)
     # larger than the donor budget -> None, and the row still computes via
     # the apply_fp8_linear fallback of apply().
     big = _randn((24 * NUM_V_HEADS, HEAD_V_DIM), seed=403, scale=0.5)
-    assert method.apply_norm_gated(
-        layer, big.reshape(24, GDN_K), big.reshape(24, GDN_K),
-        norm.weight.data, HEAD_V_DIM, 1e-6,
-    ) is None
+    assert (
+        method.apply_norm_gated(
+            layer,
+            big.reshape(24, GDN_K),
+            big.reshape(24, GDN_K),
+            norm.weight.data,
+            HEAD_V_DIM,
+            1e-6,
+        )
+        is None
+    )
 
 
 def test_fused_norm_out_proj_graph_replay_tracks_norm_and_gate(
@@ -397,9 +413,7 @@ def test_fused_norm_out_proj_graph_replay_tracks_norm_and_gate(
     z = _randn((tokens, GDN_K), seed=502, scale=1.0)
     static_x, static_z = x.clone(), z.clone()
     for _ in range(3):
-        method.apply_norm_gated(
-            layer, static_x, static_z, weight, HEAD_V_DIM, 1e-6
-        )
+        method.apply_norm_gated(layer, static_x, static_z, weight, HEAD_V_DIM, 1e-6)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
